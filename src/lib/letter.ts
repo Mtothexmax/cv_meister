@@ -113,12 +113,19 @@ export function cleanRole(rolle: string): string {
 
 /**
  * Personal salutation from contact + gender toggle ("Sehr geehrte Frau X," /
- * "Sehr geehrter Herr X," / neutral "Guten Tag X,"). Null when no contact.
+ * "Sehr geehrter Herr X," / neutral "Guten Tag X,"). Fallback when no contact:
+ * "Sehr geehrte MitarbeiterInnen von [Firmenname]," — the firm name is used
+ * verbatim, deliberately without quotation marks. Returns null only when neither
+ * contact nor firm name are available.
  * A leading Herr/Frau in the input is stripped to avoid duplication.
  */
 export function contactGreeting(job: JobData): string | null {
 	const contactName = job.ansprechpartner.trim().replace(/^(Herrn?|Frau)\s+/i, "").trim();
-	if (!contactName) return null;
+	if (!contactName) {
+		const firma = job.firma.trim();
+		if (firma) return `Sehr geehrte MitarbeiterInnen von ${firma},`;
+		return null;
+	}
 	if (job.anrede === "herr") return `Sehr geehrter Herr ${contactName},`;
 	if (job.anrede === "divers") return `Guten Tag ${contactName},`;
 	return `Sehr geehrte Frau ${contactName},`;

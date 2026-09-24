@@ -1,1 +1,0 @@
-import{o as e}from"../nodes/2.CSCw40YP.js";export{e as buildMimeMessage};

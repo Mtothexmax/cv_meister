@@ -44,6 +44,13 @@ export default defineConfig({
 			},
 			// GitHub Pages project site -> app lives under the repo base path.
 			paths: { base: '$BasePath' },
+			// "#editor" is a hash *route* (see src/routes/+page.svelte), not an
+			// in-page anchor, so the prerenderer's anchor check must not fail on it.
+			prerender: {
+				handleMissingId: ({ id, message }) => {
+					if (id !== 'editor') throw new Error(message);
+				}
+			},
 			adapter: adapter({ pages: 'build', assets: 'build', fallback: null, precompress: false, strict: false })
 		})
 	]
@@ -81,8 +88,9 @@ try {
         Write-Host "Deployed to docs/ ($([math]::Round($size, 0)) KB)" -ForegroundColor Green
     }
 } finally {
-    # Restore original vite.config.ts
-    Set-Content 'vite.config.ts' $origConfig
+    # Restore original vite.config.ts byte-for-byte. Set-Content would append a
+    # trailing newline and re-encode, which shows up as a spurious git diff.
+    [IO.File]::WriteAllText("$PWD\vite.config.ts", $origConfig, (New-Object System.Text.UTF8Encoding $false))
     Remove-Item 'src/routes/+layout.ts' -Force -ErrorAction SilentlyContinue
     Remove-Item 'build' -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "Cleaned up" -ForegroundColor DarkGray

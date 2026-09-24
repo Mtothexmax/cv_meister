@@ -16,6 +16,7 @@
 	import { buildMotivationPrompt, buildCoverPrompt, buildMailPrompt } from "$lib/prompt";
 	import { requestGoogleToken, sendGmail } from "$lib/gmail";
 	import { loadState, saveState, type PersistedState } from "$lib/storage";
+	import Landing from "$lib/Landing.svelte";
 
 	type View = "dashboard" | "detail" | "static";
 	type StaticTab = "stammdaten" | "lebenslauf" | "erfahrung" | "proben";
@@ -80,6 +81,76 @@
 	let cvCopyTimer: ReturnType<typeof setTimeout> | undefined;
 	let cvImportError = $state("");
 	let logoNote = $state("");
+
+	// --- Landing page / editor routing -------------------------------------
+	// The whole app is one route. "/" (or "#start") shows the marketing
+	// landing page, "#editor" shows the editor — so the editor can be
+	// bookmarked and shared as a direct link.
+	/** True while "#editor" (also accepts "#/editor") is in the URL. */
+	let editorActive = $state(false);
+	/** Hydration promise, shared by the landing and the editor. */
+	let hydratePromise: Promise<void> | null = null;
+	/** Set once the first PDF compile was kicked off. */
+	let editorRendered = false;
+	/** Job-ad URL handed over from the landing page, applied after hydrate. */
+	let pendingJobLink: string | null = null;
+
+	function wantsEditor(): boolean {
+		return /^#\/?editor\b/i.test(window.location.hash);
+	}
+
+	/**
+	 * Loads the stored workspace exactly once. Both routes need it, and the
+	 * landing should not pay for the Typst compile — only for the (cheap)
+	 * IndexedDB read, so switching to the editor feels instant.
+	 */
+	function ensureHydrated(): Promise<void> {
+		if (!hydratePromise) {
+			hydratePromise = (async () => {
+				await hydrate();
+				hydrated = true;
+			})();
+		}
+		return hydratePromise;
+	}
+
+	/** Starts the editor (idempotent): hydrate, then compile the preview once. */
+	async function startEditor() {
+		await ensureHydrated();
+		if (pendingJobLink) {
+			applyPendingJobLink(); // selectJob() already triggers a render
+			return;
+		}
+		if (editorRendered) return;
+		editorRendered = true;
+		render();
+	}
+
+	/** Turns a handed-over Stellen-Link into a fresh Bewerbung. */
+	function applyPendingJobLink() {
+		const link = pendingJobLink;
+		pendingJobLink = null;
+		if (!link) return;
+		const job = createJob({ link, status: "Entwurf" });
+		jobs.unshift(job);
+		filesFor(job.id);
+		selectJob(job.id);
+	}
+
+	/** Landing page → editor. Optionally carries a pasted job-ad URL. */
+	function startFromLanding(link?: string) {
+		if (link) pendingJobLink = link;
+		editorActive = true;
+		if (wantsEditor()) void startEditor();
+		else window.location.hash = "editor";
+	}
+
+	/** Reacts to hash changes (back/forward, in-page anchors, CTAs). */
+	function syncRoute() {
+		const next = wantsEditor();
+		editorActive = next;
+		if (next) void startEditor();
+	}
 
 	let renderToken = 0;
 	let renderCount = $state(0);
@@ -1027,11 +1098,12 @@
 	}
 
 	onMount(() => {
-		(async () => {
-			await hydrate();
-			hydrated = true;
-			render();
-		})();
+		// Deep link: "#editor" starts the editor straight away, everything else
+		// shows the landing page and only hydrates the stored workspace.
+		editorActive = wantsEditor();
+		if (editorActive) void startEditor();
+		else void ensureHydrated();
+		window.addEventListener("hashchange", syncRoute);
 		document.addEventListener("visibilitychange", handleVisibility);
 		window.addEventListener("pagehide", handlePageHide);
 		return () => {
@@ -1042,6 +1114,7 @@
 			clearTimeout(mailPromptTimer);
 			clearTimeout(saveTimer);
 			clearTimeout(mailSizeTimer);
+			window.removeEventListener("hashchange", syncRoute);
 			document.removeEventListener("visibilitychange", handleVisibility);
 			window.removeEventListener("pagehide", handlePageHide);
 		};
@@ -1091,10 +1164,15 @@
 </script>
 
 <svelte:head>
-	<title>CV Meister — Bewerbungen</title>
+	<title
+		>{editorActive
+			? "CV Meister — Bewerbungen"
+			: "CV Meister Pro — Bewerbungen automatisiert erstellen"}</title
+	>
 </svelte:head>
 
-<div class="min-h-screen bg-[#090d16] text-slate-100 flex h-screen overflow-hidden">
+{#if editorActive}
+	<div class="min-h-screen bg-[#090d16] text-slate-100 flex h-screen overflow-hidden">
 	{#snippet fileButton(currentName: string | null, onchange: (files: FileList | null) => void)}
 		<div class="flex items-center gap-2">
 			<label
@@ -1116,12 +1194,20 @@
 	<!-- Sidebar -->
 	<aside class="w-60 bg-[#0e1422] border-r border-[#1e293b] flex flex-col justify-between shrink-0 select-none">
 		<div>
-			<div class="h-14 px-5 border-b border-[#1e293b] flex items-center space-x-2">
+			<a
+				href="#start"
+				title="Zurück zur Startseite"
+				class="h-14 px-5 border-b border-[#1e293b] flex items-center space-x-2 hover:bg-slate-800/40 transition group"
+			>
 				<div class="w-6 h-6 rounded bg-blue-600 flex items-center justify-center text-white text-xs font-bold">
 					CV
 				</div>
 				<span class="text-xs font-bold uppercase tracking-wider text-slate-200">CV Meister</span>
-			</div>
+				<span
+					class="ml-auto text-[10px] text-slate-500 group-hover:text-slate-300 transition whitespace-nowrap"
+					>Startseite</span
+				>
+			</a>
 
 			<div class="p-3 space-y-1">
 				<button
@@ -1501,6 +1587,15 @@
 											{/if}
 										</label>
 										<label class="col-span-2">
+											<span class={labelCls}>Stellenausschreibungstext</span>
+											<textarea
+												bind:value={activeJob.adText}
+												rows="10"
+												placeholder="Hier die komplette Stellenausschreibung einfügen …"
+												class="{inputCls} font-mono leading-relaxed resize-y"
+											></textarea>
+										</label>
+										<label class="col-span-2">
 											<span class="flex items-center justify-between gap-2">
 												<span class={labelCls}
 													>Warum diese Firma? Was gefällt dir? (nur Notizen)</span
@@ -1519,15 +1614,6 @@
 												bind:value={activeJob.motivation}
 												rows="4"
 												class="{inputCls} leading-relaxed resize-y"
-											></textarea>
-										</label>
-										<label class="col-span-2">
-											<span class={labelCls}>Stellenausschreibungstext</span>
-											<textarea
-												bind:value={activeJob.adText}
-												rows="10"
-												placeholder="Hier die komplette Stellenausschreibung einfügen …"
-												class="{inputCls} font-mono leading-relaxed resize-y"
 											></textarea>
 										</label>
 									</div>
@@ -2267,7 +2353,10 @@
 			</div>
 		</div>
 	{/if}
-</div>
+	</div>
+{:else}
+	<Landing onStart={startFromLanding} />
+{/if}
 
 <style>
 	.typst-page :global(svg) {
