@@ -1,0 +1,49 @@
+Erfahrungen
+
+# Template Firma 1 (ca. 5 Jahre)
+- Aufgabenbereich 1
+- Aufgabenbereich 2
+- Intensive Arbeit mit:
+  - Technologie 1
+  - Technologie 2
+- Arbeiten im agilen Umfeld (Scrum)
+
+# Template Firma 2 (ca. 2 Jahre)
+- Aufgabenbereich 1
+- Aufgabenbereich 2
+- Technologie 1
+
+
+# Technische Fähigkeiten
+
+## Programmiersprachen
+- Programmiersprache 1 (5+ Jahre Berufserfahrung)
+- Programmiersprache 2 (2 Jahre)
+
+## Frameworks & Technologien
+- Framework 1 (sehr erfahren)
+- Framework 2 (Grundlagen)
+- Tool 1, Tool 2
+
+# Soft Skills
+- Sehr teamorientiert
+- Gewohnt an agile Arbeitsweisen (Scrum)
+- Hohe Codequalität
+- Starke Dokumentations- und Analysefähigkeiten
+
+# Freizeitprojekte
+- Projekt 1
+- Projekt 2
+
+
+# Universität / Studium
+- Master-Studiengang
+- Wichtige Module:
+  - Modul 1
+  - Modul 2
+- Abschlussarbeit:
+  - Thema der Abschlussarbeit
+
+
+#Gehaltsvorstellung:
+frühest möglicher Einstieg: Monat Jahr
