@@ -1019,7 +1019,7 @@
 	}
 
 	function addSection() {
-		cv.sections.push({ title: "Neuer Abschnitt", entries: [], skills: [] });
+		cv.sections.push({ id: nid(), title: "Neuer Abschnitt", entries: [], skills: [] });
 	}
 
 	function removeSection(i: number) {
@@ -1055,11 +1055,24 @@
 		return !id || !activeJob.hiddenSkillIds.includes(id);
 	}
 
+	/**
+	 * One entry per non-empty line. Duplicates collapse: the same value twice
+	 * would otherwise break the keyed {#each} below (each_key_duplicate) and
+	 * could never be toggled independently.
+	 *
+	 * The list is keyed by index, not by value: the same string may legitimately
+	 * appear in two different groups, and only the dedupe above is per group.
+	 */
 	function skillLines(values: string): string[] {
-		return values
-			.split(/\r?\n/)
-			.map((l) => l.trim())
-			.filter(Boolean);
+		const seen = new Set<string>();
+		const out: string[] = [];
+		for (const line of values.split(/\r?\n/)) {
+			const value = line.trim();
+			if (!value || seen.has(value)) continue;
+			seen.add(value);
+			out.push(value);
+		}
+		return out;
 	}
 
 	function toggleSkillValue(groupId: string | undefined, value: string) {
@@ -1686,7 +1699,7 @@
 
 									<div class="space-y-2">
 										<p class="text-[10px] font-semibold text-slate-400 uppercase">Skills ein/aus:</p>
-										{#each cv.sections as sec (sec.title)}
+										{#each cv.sections as sec (sec.id ?? sec.title)}
 											{#each sec.skills as group (group.id ?? group.category)}
 												<div
 													class="bg-[#0a0f1d] p-2 rounded border border-[#1e293b] text-xs"
@@ -1705,7 +1718,7 @@
 													</label>
 													{#if skillVisible(group.id)}
 														<div class="mt-1.5 ml-3 space-y-1 border-l border-[#1e293b] pl-2">
-															{#each skillLines(group.values) as value (value)}
+															{#each skillLines(group.values) as value, vi (vi)}
 																<label
 																	class="flex items-center justify-between cursor-pointer"
 																>
@@ -1792,7 +1805,7 @@
 							</div>
 						</div>
 
-						{#each cv.sections as sec, si (si)}
+						{#each cv.sections as sec, si (sec.id ?? si)}
 							<div class="{cardCls} space-y-3">
 								<div class="flex items-center gap-2">
 									<input

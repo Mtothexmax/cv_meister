@@ -33,6 +33,8 @@ export interface CvSkillGroup {
 }
 
 export interface CvSection {
+	/** Stable id for keyed rendering. Assigned via ensureCvIds(). */
+	id?: string;
 	title: string;
 	entries: CvEntry[];
 	skills: CvSkillGroup[];
@@ -67,9 +69,10 @@ export function stripCvIds(data: CvData): CvDataExport {
 	};
 }
 
-/** Assigns missing skill-group ids (keeps existing ones stable). */
+/** Assigns missing section / skill-group ids (keeps existing ones stable). */
 export function ensureCvIds(cv: CvData): CvData {
 	for (const s of cv.sections) {
+		if (!s.id) s.id = nid();
 		for (const g of s.skills) {
 			if (!g.id) g.id = nid();
 		}
@@ -236,17 +239,25 @@ export function skillValueKey(groupId: string | undefined, value: string): strin
 	return `${groupId ?? ""}::${value.trim()}`;
 }
 
-/** Visible raw values of a skill group after per-job filtering. */
+/**
+ * Visible raw values of a skill group after per-job filtering.
+ * Duplicate lines collapse: a value listed twice would otherwise be rendered
+ * twice in the CV, and toggling it off could never hide both copies.
+ */
 function visibleSkillValues(
 	text: string,
 	groupId: string | undefined,
 	hiddenValues: string[],
 ): string[] {
-	return text
-		.split(/\r?\n/)
-		.map((l) => l.trim())
-		.filter(Boolean)
-		.filter((v) => !hiddenValues.includes(skillValueKey(groupId, v)));
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const line of text.split(/\r?\n/)) {
+		const value = line.trim();
+		if (!value || seen.has(value)) continue;
+		seen.add(value);
+		if (!hiddenValues.includes(skillValueKey(groupId, value))) out.push(value);
+	}
+	return out;
 }
 
 /** Splits values into a Typst array (trailing comma: `("x",)` is an array, `("x")` is a string). */
