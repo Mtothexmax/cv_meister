@@ -525,6 +525,83 @@
 		return { letterPdf, cvPdf };
 	}
 
+	/** Which of the two PDFs is attached to the application e-mail. */
+	type MailAttKind = "letter" | "cv";
+
+	/** Busy key while one attachment action runs. */
+	function attKey(kind: MailAttKind, action: "open" | "download"): string {
+		return `${activeJob.id}:att-${action}-${kind}`;
+	}
+
+	/** File name of one mail attachment. */
+	function attFilename(kind: MailAttKind, job: JobData): string {
+		return docFilename(kind === "letter" ? "Motivationsschreiben" : "Lebenslauf", job);
+	}
+
+	/**
+	 * The two PDFs attached to the mail preview, with their sizes. `size` is
+	 * null until the background size computation has finished.
+	 */
+	function mailAttachments(): { kind: MailAttKind; name: string; size: number | null }[] {
+		return [
+			{ kind: "letter", name: attFilename("letter", activeJob), size: mailSizes.letter },
+			{ kind: "cv", name: attFilename("cv", activeJob), size: mailSizes.cv },
+		];
+	}
+
+	/** Compiles the single PDF behind one mail attachment. */
+	function compileAttachment(kind: MailAttKind, job: JobData): Promise<Uint8Array> {
+		if (kind === "letter") {
+			const jf = jobFiles[job.id];
+			return compileLetterPdf(
+				shared,
+				job,
+				job.letter,
+				samples,
+				{ logo: jf?.logo ?? null, signature: signatureFile, sampleFiles },
+				staticData.samplesDisclaimer,
+			);
+		}
+		return compileCvPdf(shared, job, cv, photoFile);
+	}
+
+	/** Downloads one attachment of the mail preview. */
+	async function downloadAttachment(kind: MailAttKind) {
+		const job = activeJob;
+		const key = attKey(kind, "download");
+		busy = key;
+		error = "";
+		try {
+			const pdf = await compileAttachment(kind, job);
+			if (busy !== key) return;
+			downloadBlob(pdf, attFilename(kind, job));
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			if (busy === key) busy = null;
+		}
+	}
+
+	/** Opens one attachment of the mail preview in the current tab. */
+	async function openAttachment(kind: MailAttKind) {
+		const job = activeJob;
+		const key = attKey(kind, "open");
+		busy = key;
+		error = "";
+		try {
+			const pdf = await compileAttachment(kind, job);
+			if (busy !== key) return;
+			const blob = new Blob([pdf.slice().buffer as ArrayBuffer], { type: "application/pdf" });
+			// Same tab: the blob URL must stay alive while the browser replaces
+			// this page with its PDF viewer, so it is deliberately not revoked.
+			window.location.href = URL.createObjectURL(blob);
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			if (busy === key) busy = null;
+		}
+	}
+
 	function formatBytes(n: number): string {
 		if (n < 1024) return `${n} B`;
 		if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
@@ -1983,17 +2060,35 @@
 						<hr class="border-neutral-200" />
 						<p class="whitespace-pre-wrap leading-relaxed">{composeMailBody(shared, activeJob, activeJob.letter)}</p>
 						<div class="space-y-2">
-							{#each [{ name: docFilename("Motivationsschreiben", activeJob), size: mailSizes.letter }, { name: docFilename("Lebenslauf", activeJob), size: mailSizes.cv }] as att (att.name)}
+							{#each mailAttachments() as att (att.name)}
 								<div class="flex items-center gap-3 rounded border border-neutral-200 bg-neutral-50 p-2">
 									<span
 										class="flex items-center justify-center w-9 h-9 rounded bg-red-600 text-white text-[10px] font-bold shrink-0"
 										>PDF</span
 									>
-									<div class="min-w-0">
+									<div class="min-w-0 flex-1">
 										<p class="text-xs font-medium text-neutral-900 truncate">{att.name}</p>
 										<p class="text-[10px] text-neutral-500">
 											{att.size != null ? formatBytes(att.size) : "wird berechnet…"}
 										</p>
+									</div>
+									<div class="flex items-center gap-1.5 shrink-0">
+										<button
+											onclick={() => openAttachment(att.kind)}
+											disabled={busy !== null}
+											title="PDF in diesem Tab öffnen"
+											class="text-[11px] font-medium px-2.5 py-1 rounded border border-neutral-300 text-neutral-700 hover:bg-neutral-200/60 disabled:opacity-40 transition"
+										>
+											{busy === attKey(att.kind, "open") ? "…" : "Öffnen"}
+										</button>
+										<button
+											onclick={() => downloadAttachment(att.kind)}
+											disabled={busy !== null}
+											title="PDF herunterladen"
+											class="text-[11px] font-medium px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-white disabled:opacity-40 transition"
+										>
+											{busy === attKey(att.kind, "download") ? "…" : "Download"}
+										</button>
 									</div>
 								</div>
 							{/each}
