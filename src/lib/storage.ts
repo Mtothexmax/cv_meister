@@ -13,7 +13,15 @@ export interface PersistedFiles {
 	photo: Blob | null;
 	signature: Blob | null;
 	samples: Record<string, Blob>;
+	/** Extra PDFs by document id (Statische Daten → PDF). */
+	documents: Record<string, Blob>;
 	logos: Record<string, Blob | null>;
+	/**
+	 * Source URL per job id, set only when the logo was loaded from a URL
+	 * (JSON import). The fetched bytes live in `logos`; this keeps the origin so
+	 * the application JSON can export the URL instead of image data.
+	 */
+	logoUrls: Record<string, string | null>;
 }
 
 export interface PersistedState {
@@ -23,6 +31,8 @@ export interface PersistedState {
 	jobs: unknown;
 	cv: unknown;
 	samples: unknown;
+	/** Extra PDFs (Statische Daten → PDF). Absent in states saved before this feature. */
+	documents: unknown;
 	staticData: unknown;
 	activeJobId: string;
 	view: string;

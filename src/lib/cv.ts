@@ -47,28 +47,6 @@ export interface CvData {
 	sections: CvSection[];
 }
 
-/** CvData stripped of internal ids — safe for JSON export/import. */
-export interface CvDataExport {
-	fuehrerschein: string;
-	sections: {
-		title: string;
-		entries: CvEntry[];
-		skills: { category: string; values: string }[];
-	}[];
-}
-
-/** Strips internal ids from a CvData snapshot for clean JSON export. */
-export function stripCvIds(data: CvData): CvDataExport {
-	return {
-		fuehrerschein: data.fuehrerschein,
-		sections: data.sections.map((s) => ({
-			title: s.title,
-			entries: s.entries.map((e) => ({ ...e })),
-			skills: s.skills.map((g) => ({ category: g.category, values: g.values })),
-		})),
-	};
-}
-
 /** Assigns missing section / skill-group ids (keeps existing ones stable). */
 export function ensureCvIds(cv: CvData): CvData {
 	for (const s of cv.sections) {
@@ -240,24 +218,32 @@ export function skillValueKey(groupId: string | undefined, value: string): strin
 }
 
 /**
- * Visible raw values of a skill group after per-job filtering.
- * Duplicate lines collapse: a value listed twice would otherwise be rendered
- * twice in the CV, and toggling it off could never hide both copies.
+ * One entry per non-empty line, duplicates collapsed.
+ *
+ * Duplicates have to go: a value listed twice would otherwise break the keyed
+ * `{#each}` that renders the per-job skill toggles (`each_key_duplicate`) and
+ * could never be switched off as a whole. Shared by the UI and the PDF/JSON
+ * rendering so both always agree on what "one value" means.
  */
+export function skillLines(values: string): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const line of values.split(/\r?\n/)) {
+		const value = line.trim();
+		if (!value || seen.has(value)) continue;
+		seen.add(value);
+		out.push(value);
+	}
+	return out;
+}
+
+/** Visible raw values of a skill group after per-job filtering. */
 function visibleSkillValues(
 	text: string,
 	groupId: string | undefined,
 	hiddenValues: string[],
 ): string[] {
-	const seen = new Set<string>();
-	const out: string[] = [];
-	for (const line of text.split(/\r?\n/)) {
-		const value = line.trim();
-		if (!value || seen.has(value)) continue;
-		seen.add(value);
-		if (!hiddenValues.includes(skillValueKey(groupId, value))) out.push(value);
-	}
-	return out;
+	return skillLines(text).filter((v) => !hiddenValues.includes(skillValueKey(groupId, v)));
 }
 
 /** Splits values into a Typst array (trailing comma: `("x",)` is an array, `("x")` is a string). */

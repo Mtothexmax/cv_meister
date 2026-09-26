@@ -1,31 +1,73 @@
 <script lang="ts">
 	import { onMount } from "svelte";
 	import { compileLetter, compileLetterPdf, compileCv, compileCvPdf } from "$lib/letterCompiler";
-	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, safeAccentColor, type LetterData, type WorkSample } from "$lib/letter";
-	import { DEFAULT_CV, ensureCvIds, skillValueKey, stripCvIds, type CvData, type CvDataExport } from "$lib/cv";
+	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, contactGreeting, safeAccentColor, type LetterData, type WorkSample } from "$lib/letter";
+	import { DEFAULT_CV, ensureCvIds, skillLines, skillValueKey, type CvData } from "$lib/cv";
 	import { DEFAULT_SHARED, einstiegText, nid, type SharedData } from "$lib/shared";
-	import { DEFAULT_STATIC, type StaticData } from "$lib/static";
 	import {
-		isWorkspaceBackup,
-		toBackupFile,
-		backupFileToFile,
-		type WorkspaceBackup,
-	} from "$lib/backup";
+		DEFAULT_DOCUMENTS,
+		DEFAULT_STATIC,
+		ensureDocumentIds,
+		type ExtraDocument,
+		type StaticData,
+	} from "$lib/static";
+	import {
+		blobToDataUrl,
+		dataUrlToFile,
+		imageFilenameFromUrl,
+		sniffImage,
+	} from "$lib/binary";
+	import {
+		JSON_VERSION,
+		applyFilters,
+		buildApplicationJson,
+		buildCvJson,
+		buildWorkspaceJson,
+		filterAsText,
+		isAppJson,
+		readApplicationJson,
+		readArt,
+		readCvJson,
+		readWorkspaceJson,
+		type AnyDoc,
+		type ApplicationDoc,
+		type ApplicationInput,
+		type WorkspaceDoc,
+	} from "$lib/appJson";
 	import { DEFAULT_JOBS, createJob, type JobData, type JobStatus } from "$lib/job";
 	import { extractAccentColor } from "$lib/colors";
 	import { buildMotivationPrompt, buildCoverPrompt, buildMailPrompt } from "$lib/prompt";
-	import { requestGoogleToken, sendGmail } from "$lib/gmail";
+	import { requestGoogleToken, sendGmail, type MailAttachment } from "$lib/gmail";
 	import { loadState, saveState, type PersistedState } from "$lib/storage";
 	import Landing from "$lib/Landing.svelte";
 
 	type View = "dashboard" | "detail" | "static";
-	type StaticTab = "stammdaten" | "lebenslauf" | "erfahrung" | "proben";
+	type StaticTab = "stammdaten" | "lebenslauf" | "erfahrung" | "proben" | "pdf";
+
+	const staticTabs: { id: StaticTab; label: string }[] = [
+		{ id: "stammdaten", label: "Stammdaten" },
+		{ id: "lebenslauf", label: "Lebenslauf" },
+		{ id: "erfahrung", label: "Erfahrung" },
+		{ id: "proben", label: "Arbeitsproben" },
+		{ id: "pdf", label: "PDF" },
+	];
+
+	/**
+	 * Single source of truth for "is this a tab we still know about" — used for
+	 * both the persisted state and the JSON import. A dropped/renamed tab id
+	 * falls back to Stammdaten instead of rendering an empty pane.
+	 */
+	function isStaticTab(v: unknown): v is StaticTab {
+		return typeof v === "string" && staticTabs.some((t) => t.id === v);
+	}
 
 	let view = $state<View>("dashboard");
 	let shared = $state<SharedData>(structuredClone(DEFAULT_SHARED));
 	let jobs = $state<JobData[]>(structuredClone(DEFAULT_JOBS));
 	let cv = $state<CvData>(ensureCvIds(structuredClone(DEFAULT_CV)));
 	let samples = $state<WorkSample[]>(structuredClone(DEFAULT_SAMPLES));
+	/** Extra PDFs attached to every application (Statische Daten → PDF). */
+	let documents = $state<ExtraDocument[]>(structuredClone(DEFAULT_DOCUMENTS));
 	let staticData = $state<StaticData>(structuredClone(DEFAULT_STATIC));
 	let staticTab = $state<StaticTab>("stammdaten");
 	let activeJobId = $state<string>("");
@@ -35,9 +77,17 @@
 	let signatureFile = $state<File | null>(null);
 	/** Sample images by sample id (global pool). */
 	let sampleFiles = $state<Record<string, File>>({});
+	/** Uploaded PDFs by document id (global pool, attached to every mail). */
+	let documentFiles = $state<Record<string, File>>({});
 
 	interface JobFiles {
 		logo: File | null;
+		/**
+		 * Set only when the logo was loaded from a URL ("URL wählen" or a JSON
+		 * import). `logo` then holds the fetched bytes; this is the origin, and
+		 * it is what the application JSON exports instead of image data.
+		 */
+		logoUrl: string | null;
 	}
 
 	let jobFiles = $state<Record<string, JobFiles>>({});
@@ -45,7 +95,7 @@
 	function filesFor(id: string): JobFiles {
 		let f = jobFiles[id];
 		if (!f) {
-			f = { logo: null };
+			f = { logo: null, logoUrl: null };
 			jobFiles[id] = f;
 		}
 		return f;
@@ -61,9 +111,23 @@
 	let ready = $state(false);
 	let previewCollapsed = $state(false);
 	let backupOpen = $state(false);
-	let stagedBackup = $state<{ name: string; data: WorkspaceBackup } | null>(null);
+	let stagedBackup = $state<{ name: string; data: WorkspaceDoc } | null>(null);
 	/** Two-step confirm for "reset workspace to placeholder defaults". */
 	let confirmReset = $state(false);
+	/**
+	 * An application JSON read from the clipboard, waiting for the "replace the
+	 * open application" confirmation. Nothing is touched until the user
+	 * confirms — importing rewrites the application's fields and its switch
+	 * state.
+	 */
+	let stagedAppImport = $state<{ quelle: string; doc: ApplicationDoc } | null>(null);
+	let appImportError = $state("");
+	let appJsonCopied = $state(false);
+	let appJsonTimer: ReturnType<typeof setTimeout> | undefined;
+	/** URL prompt for "URL wählen" next to the logo picker. */
+	let logoUrlOpen = $state(false);
+	let logoUrlInput = $state("");
+	let logoUrlBusy = $state(false);
 	type PreviewDoc = "letter" | "cv" | "mail";
 	let previewDoc = $state<PreviewDoc>("letter");
 	let mailAvailable = $derived(activeJob.emailText.trim().length > 0);
@@ -260,14 +324,26 @@
 	 * raw $state proxies cannot pass structured serialization (IndexedDB). */
 	function collectState(): PersistedState {
 		const logos: Record<string, Blob | null> = {};
-		for (const [id, f] of Object.entries(jobFiles)) logos[id] = f.logo;
+		const logoUrls: Record<string, string | null> = {};
+		for (const [id, f] of Object.entries(jobFiles)) {
+			logos[id] = f.logo;
+			logoUrls[id] = f.logoUrl;
+		}
 		const snap = $state.snapshot({
 			shared,
 			jobs,
 			cv,
 			samples,
+			documents,
 			staticData,
-			files: { photo: photoFile, signature: signatureFile, samples: { ...sampleFiles }, logos },
+			files: {
+				photo: photoFile,
+				signature: signatureFile,
+				samples: { ...sampleFiles },
+				documents: { ...documentFiles },
+				logos,
+				logoUrls,
+			},
 		});
 		return {
 			version: 1,
@@ -276,6 +352,7 @@
 			jobs: snap.jobs,
 			cv: snap.cv,
 			samples: snap.samples,
+			documents: snap.documents,
 			staticData: snap.staticData,
 			activeJobId,
 			view,
@@ -351,6 +428,7 @@
 			}
 			if (s.cv && typeof s.cv === "object") cv = ensureCvIds(s.cv as CvData);
 			if (Array.isArray(s.samples)) samples = s.samples as WorkSample[];
+			if (Array.isArray(s.documents)) documents = ensureDocumentIds(s.documents as ExtraDocument[]);
 			if (s.staticData && typeof s.staticData === "object")
 				staticData = s.staticData as StaticData;
 			if (typeof staticData.samplesDisclaimer !== "string")
@@ -358,13 +436,7 @@
 			if (typeof s.activeJobId === "string" && jobs.some((j) => j.id === s.activeJobId))
 				activeJobId = s.activeJobId;
 			if (s.view === "dashboard" || s.view === "detail" || s.view === "static") view = s.view;
-			if (
-				s.staticTab === "stammdaten" ||
-				s.staticTab === "lebenslauf" ||
-				s.staticTab === "erfahrung" ||
-				s.staticTab === "proben"
-			)
-				staticTab = s.staticTab;
+			if (isStaticTab(s.staticTab)) staticTab = s.staticTab;
 			const f = s.files;
 			if (f && typeof f === "object") {
 				if (f.photo instanceof Blob) photoFile = f.photo as File;
@@ -374,9 +446,19 @@
 						if (v instanceof Blob) sampleFiles[k] = v as File;
 					}
 				}
+				if (f.documents && typeof f.documents === "object") {
+					for (const [k, v] of Object.entries(f.documents)) {
+						if (v instanceof Blob) documentFiles[k] = v as File;
+					}
+				}
 				if (f.logos && typeof f.logos === "object") {
 					for (const [id, v] of Object.entries(f.logos)) {
 						if (v instanceof Blob) filesFor(id).logo = v as File;
+					}
+				}
+				if (f.logoUrls && typeof f.logoUrls === "object") {
+					for (const [id, v] of Object.entries(f.logoUrls)) {
+						if (typeof v === "string" && v) filesFor(id).logoUrl = v;
 					}
 				}
 			}
@@ -417,6 +499,263 @@
 		a.download = filename;
 		a.click();
 		URL.revokeObjectURL(url);
+	}
+
+	// --- Self-describing JSON (format lives in $lib/appJson.ts) --------------
+	// One format for all three exports: Bewerbung, Arbeitsbereich, Lebenslauf.
+	// Every editable value is wrapped as { label, _comment, info, value } so the
+	// file explains itself and an AI can edit it without knowing the app.
+	//
+	// Bewerbung and Lebenslauf go through the CLIPBOARD both ways — the whole
+	// point is copy → paste into a prompt → paste the answer back. Only the
+	// Arbeitsbereich (the full backup, with every image as base64) is a file.
+
+	/** Downloads a document as pretty-printed JSON. */
+	function downloadJson(doc: unknown, filename: string): void {
+		downloadBlob(
+			new TextEncoder().encode(JSON.stringify(doc, null, 2)),
+			filename,
+			"application/json",
+		);
+	}
+
+	/**
+	 * The cv-meister document currently in the clipboard, validated.
+	 *
+	 * Every failure mode gets its own message: an unreadable clipboard, an empty
+	 * one, a plain-text answer an AI forgot to wrap in a code block, and a JSON
+	 * that is not ours are four very different mistakes.
+	 *
+	 * The envelope check lives in here on purpose: the return type is `AnyDoc`,
+	 * not `unknown`, so a caller that forgets the `await` gets a compile error
+	 * (`doc.art` on a Promise) instead of a confusing "not a cv-meister JSON".
+	 */
+	async function parseClipboardJson(kind: string): Promise<AnyDoc> {
+		let raw = "";
+		try {
+			raw = await navigator.clipboard.readText();
+		} catch {
+			throw new Error("Zwischenablage nicht lesbar (Zugriff verweigert).");
+		}
+		if (!raw.trim()) {
+			throw new Error(`Die Zwischenablage ist leer — zuerst „JSON kopieren“ (${kind}).`);
+		}
+		let data: unknown;
+		try {
+			data = JSON.parse(raw);
+		} catch {
+			throw new Error("Der Inhalt der Zwischenablage ist kein JSON.");
+		}
+		if (!isAppJson(data)) {
+			throw new Error(
+				`Kein cv-meister-JSON in der Zwischenablage (format/version ${JSON_VERSION} erwartet).`,
+			);
+		}
+		return data;
+	}
+
+	/** Name tag used in export file names: applicant, else firm, else generic. */
+	function jsonTag(job: JobData | null = null): string {
+		const name = `${shared.firstname} ${shared.lastname}`.trim();
+		return name || job?.firma.trim() || "cv-meister";
+	}
+
+	function jsonFilename(kind: string, job: JobData | null = null): string {
+		const day = new Date().toISOString().slice(0, 10);
+		return `${kind} ${jsonTag(job)} ${day}.json`;
+	}
+
+	/**
+	 * Everything the JSON builders need, read from live state.
+	 *
+	 * `withBase64` is the single difference between the exports: the
+	 * application export references images by name (and the logo by URL) so the
+	 * file stays hand-editable, the workspace export carries their bytes.
+	 */
+	async function jsonInput(job: JobData, withBase64: boolean): Promise<ApplicationInput> {
+		const files = jobFiles[job.id];
+		const input: ApplicationInput = {
+			job,
+			shared,
+			cv,
+			samples,
+			documents,
+			logoUrl: files?.logoUrl ?? null,
+			logoName: files?.logo?.name ?? null,
+			photoName: photoFile?.name ?? null,
+			signatureName: signatureFile?.name ?? null,
+			documentHasFile: (id) => !!documentFiles[id],
+			documentFileName: documentFilename,
+			preview: {
+				mail: {
+					an: job.email.trim(),
+					betreff: bewerbungTitel(job.rolle),
+					text: composeMailBody(shared, job, job.letter),
+					anhaenge: mailAttachments(job).map((a) => a.name),
+				},
+				anschreiben: {
+					anrede: contactGreeting(job),
+					text: job.letter.body,
+					grussformel: job.letter.closing,
+					name: shared.signatureName,
+				},
+			},
+		};
+		if (!withBase64) return input;
+		input.logoBase64 = files?.logo ? await blobToDataUrl(files.logo) : null;
+		input.photoBase64 = photoFile ? await blobToDataUrl(photoFile) : null;
+		input.signatureBase64 = signatureFile ? await blobToDataUrl(signatureFile) : null;
+		input.sampleBase64 = {};
+		for (const [id, f] of Object.entries(sampleFiles)) {
+			input.sampleBase64[id] = await blobToDataUrl(f);
+		}
+		input.documentBase64 = {};
+		for (const [id, f] of Object.entries(documentFiles)) {
+			input.documentBase64[id] = await blobToDataUrl(f);
+		}
+		return input;
+	}
+
+	/**
+	 * Copies the open application to the clipboard.
+	 *
+	 * That is the intended flow: paste the JSON into a prompt, let an AI fill in
+	 * the empty `value` fields, paste it back into the import dialog. No image
+	 * bytes travel — the logo is a URL an AI can actually write.
+	 */
+	async function copyApplicationJson(): Promise<void> {
+		error = "";
+		try {
+			const payload = JSON.stringify(
+				buildApplicationJson(await jsonInput(activeJob, false)),
+				null,
+				2,
+			);
+			await navigator.clipboard.writeText(payload);
+			appJsonCopied = true;
+			clearTimeout(appJsonTimer);
+			appJsonTimer = setTimeout(() => (appJsonCopied = false), 1500);
+		} catch {
+			error = "Kopieren fehlgeschlagen (Clipboard blockiert).";
+		}
+	}
+
+	/**
+	 * Reads an application JSON from the clipboard — the counterpart to
+	 * "JSON kopieren". No file picker: copy, paste into a prompt, paste the
+	 * answer back, import.
+	 *
+	 * Nothing is applied yet: the document is only staged, and the confirm
+	 * dialog does the replacing.
+	 */
+	async function importApplicationJson(): Promise<void> {
+		appImportError = "";
+		error = "";
+		try {
+			const doc = await parseClipboardJson("Bewerbung");
+			if (doc.art !== "bewerbung") {
+				throw new Error(`Erwartet wird eine einzelne Bewerbung, gefunden: "${doc.art}".`);
+			}
+			stagedAppImport = { quelle: "Zwischenablage", doc };
+		} catch (e) {
+			error = e instanceof Error ? e.message : "Zwischenablage konnte nicht gelesen werden.";
+		}
+	}
+
+	/**
+	 * Replaces the open application with the staged file.
+	 *
+	 * Only what belongs to *this* application is touched: its fields, the
+	 * Anschreiben and its switch state. The CV, the work-sample pool and the
+	 * extra-PDF list are global and stay as they are — the file deliberately
+	 * carries no CV content, no sample data and no document bytes.
+	 *
+	 * The switch state travels as text (section/category/value, sample titles),
+	 * so it is resolved against the live CV and sample pool by `applyFilters`.
+	 */
+	function applyApplicationImport(): void {
+		const staged = stagedAppImport;
+		if (!staged) return;
+		const job = activeJob;
+		const parsed = readApplicationJson(staged.doc, job.id, shared);
+		if (!parsed) {
+			appImportError = "Die Datei enthält keine Bewerbung.";
+			return;
+		}
+		appImportError = "";
+		stagedAppImport = null;
+
+		if (parsed.shared) shared = parsed.shared;
+
+		Object.assign(job, { ...job, ...parsed.job, id: job.id, letter: parsed.letter });
+		applyFilters(job, cv, samples, parsed);
+
+		filesFor(job.id).logoUrl = parsed.logoUrl;
+		if (parsed.logoUrl) {
+			logoNote = "Logo wird von der URL geladen …";
+			void loadLogoFromUrl(parsed.logoUrl, job);
+		} else {
+			logoNote = "";
+		}
+
+		view = "detail";
+		render();
+		scheduleSave();
+	}
+
+	/** Loads a logo from a URL and stores the bytes as the job's logo file. */
+	async function loadLogoFromUrl(url: string, job: JobData, quiet = false): Promise<void> {
+		const target = filesFor(job.id);
+		try {
+			const res = await fetch(url, { mode: "cors", credentials: "omit" });
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			// Validate the bytes, not the Content-Type header: a page URL returns
+			// HTML, which Typst would hand to its SVG parser and fail on with a
+			// message about `<head>` and `<link>`. Nothing is stored on failure,
+			// so a previously loaded logo survives a bad attempt.
+			const bytes = new Uint8Array(await res.arrayBuffer());
+			const kind = sniffImage(bytes);
+			if (!kind) {
+				const type = res.headers.get("content-type")?.split(";")[0].trim() || "unbekannt";
+				throw new Error(
+					`kein Bild — die URL liefert ${type}. Bitte einen direkten Link zur ` +
+						"Bilddatei verwenden (PNG, JPG, GIF, WebP, SVG).",
+				);
+			}
+			const file = new File([bytes], imageFilenameFromUrl(url, kind.ext), {
+				type: kind.mime,
+			});
+			target.logo = file;
+			target.logoUrl = url;
+			const color = await extractAccentColor(file);
+			if (!quiet) {
+				logoNote = color
+					? `Logo von der URL geladen, Farbe ${color} übernommen.`
+					: "Logo von der URL geladen — keine Farbe gefunden.";
+			}
+			if (color) job.accentColor = color;
+		} catch (e) {
+			// A failure is always reported, even on a quiet (JSON-import) load —
+			// otherwise the note stays on "wird geladen …" forever.
+			logoNote = `Logo-URL nicht ladbar: ${e instanceof Error ? e.message : String(e)}`;
+		}
+		render();
+		scheduleSave();
+	}
+
+	function openLogoUrl() {
+		logoUrlInput = filesFor(activeJob.id).logoUrl ?? "";
+		logoUrlOpen = true;
+	}
+
+	async function applyLogoUrl(): Promise<void> {
+		const url = logoUrlInput.trim();
+		if (!url) return;
+		logoUrlBusy = true;
+		logoNote = "Logo wird geladen …";
+		await loadLogoFromUrl(url, activeJob);
+		logoUrlBusy = false;
+		logoUrlOpen = false;
 	}
 
 	function docFilename(kind: "Motivationsschreiben" | "Lebenslauf", job: JobData): string {
@@ -497,7 +836,7 @@
 
 	async function copyCvJson() {
 		try {
-			const payload = JSON.stringify({ version: 1, data: stripCvIds($state.snapshot(cv)) }, null, 2);
+			const payload = JSON.stringify(buildCvJson($state.snapshot(cv)), null, 2);
 			await navigator.clipboard.writeText(payload);
 			cvCopied = true;
 			clearTimeout(cvCopyTimer);
@@ -507,33 +846,31 @@
 		}
 	}
 
-	function triggerCvImport() {
-		cvImportError = "";
-		const input = document.getElementById("cv-import-input") as HTMLInputElement | null;
-		input?.click();
-	}
-
-	async function onCvImportFile(files: FileList | null) {
-		const file = files?.[0];
-		if (!file) return;
+	/**
+	 * Reads a CV JSON from the clipboard — the counterpart to "JSON kopieren".
+	 *
+	 * No file picker: the workflow is copy → paste into a prompt → paste the
+	 * answer back. The new CV gets fresh section/group ids, so every job's
+	 * switch state has to be re-resolved by text, or it would silently stop
+	 * matching.
+	 */
+	async function importCvJson(): Promise<void> {
 		cvImportError = "";
 		try {
-			const text = await file.text();
-			const parsed = JSON.parse(text) as { version: number; data: unknown };
-			if (typeof parsed.version !== "number" || !parsed.data || typeof parsed.data !== "object") {
-				throw new Error("Ungültiges Format");
+			const doc = await parseClipboardJson("Lebenslauf");
+			if (doc.art !== "lebenslauf") {
+				throw new Error(`Erwartet wird ein Lebenslauf-Export, gefunden: "${doc.art}".`);
 			}
-			// Validate structure without relying on id fields
-			const imported = parsed.data as Record<string, unknown>;
-			if (!Array.isArray(imported.sections)) throw new Error("Fehlendes Feld: sections");
-			for (const sec of imported.sections) {
-				if (!sec || typeof sec !== "object") throw new Error("Ungültiger Abschnitt");
-				const s = sec as Record<string, unknown>;
-				if (typeof s.title !== "string") throw new Error("Fehlendes Feld: title");
-				if (!Array.isArray(s.entries)) throw new Error("Fehlendes Feld: entries");
-				if (!Array.isArray(s.skills)) throw new Error("Fehlendes Feld: skills");
+			const next = readCvJson(doc);
+			if (!next) throw new Error("Fehlendes Feld: abschnitte");
+			const filtersByJob = new Map(
+				jobs.map((j) => [j.id, filterAsText(j, cv, samples)] as const),
+			);
+			cv = next;
+			for (const j of jobs) {
+				const saved = filtersByJob.get(j.id);
+				if (saved) applyFilters(j, cv, samples, saved);
 			}
-			cv = ensureCvIds(imported as unknown as Parameters<typeof ensureCvIds>[0]);
 			scheduleRender();
 		} catch (e) {
 			cvImportError = e instanceof Error ? e.message : "Import fehlgeschlagen";
@@ -596,31 +933,91 @@
 		return { letterPdf, cvPdf };
 	}
 
-	/** Which of the two PDFs is attached to the application e-mail. */
-	type MailAttKind = "letter" | "cv";
+	/**
+	 * Which PDF is attached to the application e-mail: one of the two generated
+	 * documents, or an uploaded extra PDF (`doc:<document id>`).
+	 */
+	type MailAttKind = "letter" | "cv" | `doc:${string}`;
+
+	/** Prefix that turns a document id into a `MailAttKind`. */
+	const DOC_PREFIX = "doc:";
+
+	function docKind(id: string): MailAttKind {
+		return `${DOC_PREFIX}${id}`;
+	}
+
+	function docIdOf(kind: MailAttKind): string {
+		return kind.slice(DOC_PREFIX.length);
+	}
 
 	/** Busy key while one attachment action runs. */
 	function attKey(kind: MailAttKind, action: "open" | "download"): string {
 		return `${activeJob.id}:att-${action}-${kind}`;
 	}
 
-	/** File name of one mail attachment. */
-	function attFilename(kind: MailAttKind, job: JobData): string {
-		return docFilename(kind === "letter" ? "Motivationsschreiben" : "Lebenslauf", job);
+	/**
+	 * The picker is not the only way a document can arrive (JSON import), so
+	 * anything that is not a PDF is rejected rather than attached under a
+	 * wrong MIME type.
+	 */
+	function isPdf(file: File): boolean {
+		return file.type === "application/pdf" || /\.pdf$/i.test(file.name);
 	}
 
 	/**
-	 * The two PDFs attached to the mail preview, with their sizes. `size` is
-	 * null until the background size computation has finished.
+	 * Attachment file name of an extra document: the edited name, normalised to
+	 * a single `.pdf` suffix so "Zeugnis" and "Zeugnis.pdf" both come out right.
+	 * Path separators are stripped — they would corrupt the MIME header.
 	 */
-	function mailAttachments(): { kind: MailAttKind; name: string; size: number | null }[] {
-		return [
-			{ kind: "letter", name: attFilename("letter", activeJob), size: mailSizes.letter },
-			{ kind: "cv", name: attFilename("cv", activeJob), size: mailSizes.cv },
-		];
+	function documentFilename(doc: ExtraDocument): string {
+		const base = doc.name
+			.trim()
+			.replace(/\.pdf$/i, "")
+			.replace(/[\\/:*?"<>|]+/g, "-")
+			.trim();
+		return `${base || "Dokument"}.pdf`;
 	}
 
-	/** Compiles the single PDF behind one mail attachment. */
+	/** File name of one mail attachment. */
+	function attFilename(kind: MailAttKind, job: JobData): string {
+		if (kind === "letter") return docFilename("Motivationsschreiben", job);
+		if (kind === "cv") return docFilename("Lebenslauf", job);
+		const doc = documents.find((d) => d.id === docIdOf(kind));
+		return doc ? documentFilename(doc) : "Dokument.pdf";
+	}
+
+	/**
+	 * Every PDF attached to the application mail: the two generated documents
+	 * plus the uploaded extra PDFs, with their sizes. `size` is null for the
+	 * generated ones until the background computation has finished.
+	 */
+	function mailAttachments(
+		job: JobData = activeJob,
+	): { kind: MailAttKind; name: string; size: number | null }[] {
+		// Sizes are only measured for the open application; elsewhere the name is
+		// what matters (the JSON export lists attachment names).
+		const sizes = job.id === activeJob.id ? mailSizes : { letter: null, cv: null };
+		const list: { kind: MailAttKind; name: string; size: number | null }[] = [
+			{ kind: "letter", name: attFilename("letter", job), size: sizes.letter },
+			{ kind: "cv", name: attFilename("cv", job), size: sizes.cv },
+		];
+		for (const doc of documents) {
+			// A row without a file has nothing to attach; the PDF tab says so.
+			const file = doc.id ? documentFiles[doc.id] : undefined;
+			if (!file) continue;
+			list.push({ kind: docKind(doc.id), name: documentFilename(doc), size: file.size });
+		}
+		return list;
+	}
+
+	/** Bytes of one uploaded document — no compilation involved. */
+	async function readDocumentBytes(id: string): Promise<Uint8Array> {
+		const file = documentFiles[id];
+		if (!file) throw new Error("Für dieses Dokument ist keine PDF-Datei hinterlegt.");
+		return new Uint8Array(await file.arrayBuffer());
+	}
+
+	/** Produces the single PDF behind one mail attachment. */
 	function compileAttachment(kind: MailAttKind, job: JobData): Promise<Uint8Array> {
 		if (kind === "letter") {
 			const jf = jobFiles[job.id];
@@ -633,7 +1030,8 @@
 				staticData.samplesDisclaimer,
 			);
 		}
-		return compileCvPdf(shared, job, cv, photoFile);
+		if (kind === "cv") return compileCvPdf(shared, job, cv, photoFile);
+		return readDocumentBytes(docIdOf(kind));
 	}
 
 	/** Downloads one attachment of the mail preview. */
@@ -673,6 +1071,32 @@
 		}
 	}
 
+	/**
+	 * Attachments for an outgoing mail, in order: the two generated PDFs, then
+	 * the uploaded extra documents. A document whose file is missing is skipped
+	 * rather than failing the whole send — mailAttachments() hides it too.
+	 */
+	async function mailAttachmentPayloads(job: JobData): Promise<MailAttachment[]> {
+		const { letterPdf, cvPdf } = await compileBothPdfs(job);
+		const list: MailAttachment[] = [
+			{
+				filename: docFilename("Motivationsschreiben", job),
+				mimeType: "application/pdf",
+				bytes: letterPdf,
+			},
+			{ filename: docFilename("Lebenslauf", job), mimeType: "application/pdf", bytes: cvPdf },
+		];
+		for (const doc of documents) {
+			if (!doc.id || !documentFiles[doc.id]) continue;
+			list.push({
+				filename: documentFilename(doc),
+				mimeType: "application/pdf",
+				bytes: await readDocumentBytes(doc.id),
+			});
+		}
+		return list;
+	}
+
 	function formatBytes(n: number): string {
 		if (n < 1024) return `${n} B`;
 		if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
@@ -707,28 +1131,21 @@
 		}
 	}
 
-	/** Downloads a complete .eml (text + both PDFs) to open in a mail program. */
+	/** Downloads a complete .eml (text + every attachment) for a mail program. */
 	async function downloadEml() {
 		const job = activeJob;
 		const key = `${job.id}:eml`;
 		busy = key;
 		error = "";
 		try {
-			const { letterPdf, cvPdf } = await compileBothPdfs(job);
+			const attachments = await mailAttachmentPayloads(job);
 			if (busy !== key) return;
 			const { buildMimeMessage } = await import("$lib/gmail");
 			const mime = buildMimeMessage(
 				job.email.trim(),
 				bewerbungTitel(job.rolle),
 				composeMailBody(shared, job, job.letter),
-				[
-					{
-						filename: docFilename("Motivationsschreiben", job),
-						mimeType: "application/pdf",
-						bytes: letterPdf,
-					},
-					{ filename: docFilename("Lebenslauf", job), mimeType: "application/pdf", bytes: cvPdf },
-				],
+				attachments,
 			);
 			downloadBlob(new TextEncoder().encode(mime), emlFilename(job), "message/rfc822");
 		} catch (e) {
@@ -738,7 +1155,7 @@
 		}
 	}
 
-	/** Sends both PDFs to the company's configured e-mail via the user's Gmail. */
+	/** Sends every attachment to the company's configured e-mail via the user's Gmail. */
 	async function sendViaGmail() {
 		const job = activeJob;
 		const to = job.email.trim();
@@ -748,15 +1165,14 @@
 		error = "";
 		try {
 			const token = await requestGoogleToken();
-			const { letterPdf, cvPdf } = await compileBothPdfs(job);
-			sendStatus = await sendGmail(token, to, bewerbungTitel(job.rolle), composeMailBody(shared, job, job.letter), [
-				{
-					filename: docFilename("Motivationsschreiben", job),
-					mimeType: "application/pdf",
-					bytes: letterPdf,
-				},
-				{ filename: docFilename("Lebenslauf", job), mimeType: "application/pdf", bytes: cvPdf },
-			]);
+			const attachments = await mailAttachmentPayloads(job);
+			sendStatus = await sendGmail(
+				token,
+				to,
+				bewerbungTitel(job.rolle),
+				composeMailBody(shared, job, job.letter),
+				attachments,
+			);
 		} catch (e) {
 			sendStatus = { ok: false, message: e instanceof Error ? e.message : String(e) };
 		} finally {
@@ -766,42 +1182,25 @@
 
 	// --- Jobs ---
 
-	/** Downloads the whole workspace as JSON (state + images as base64, no PDFs). */
+	/**
+	 * Downloads the whole workspace in the same format — the only export that
+	 * carries image and PDF bytes, because none of them can be regenerated.
+	 */
 	async function exportWorkspace() {
+		error = "";
 		try {
-			const snap = $state.snapshot({ shared, jobs, cv, samples, staticData });
-			const logos: Record<string, import("$lib/backup").BackupFile | null> = {};
-			for (const [id, f] of Object.entries(jobFiles)) {
-				logos[id] = await toBackupFile(f.logo, `logo-${id}.png`);
-			}
-			const sampleEntries: Record<string, import("$lib/backup").BackupFile> = {};
-			for (const [id, f] of Object.entries(sampleFiles)) {
-				const bf = await toBackupFile(f, `sample-${id}.png`);
-				if (bf) sampleEntries[id] = bf;
-			}
-			const backup: WorkspaceBackup = {
-				app: "cv-meister",
-				version: 1,
-				exportedAt: new Date().toISOString(),
-				state: {
-					shared: snap.shared,
-					jobs: snap.jobs,
-					cv: snap.cv,
-					samples: snap.samples,
-					staticData: snap.staticData,
-					activeJobId,
-					view,
-					staticTab,
-				},
-				files: {
-					photo: await toBackupFile(photoFile, "profil.png"),
-					signature: await toBackupFile(signatureFile, "unterschrift.png"),
-					samples: sampleEntries,
-					logos,
-				},
-			};
-			const day = new Date().toISOString().slice(0, 10);
-			downloadBlob(new TextEncoder().encode(JSON.stringify(backup)), `cv-meister-backup-${day}.json`, "application/json");
+			const inputs: ApplicationInput[] = [];
+			for (const job of jobs) inputs.push(await jsonInput(job, true));
+			const doc = buildWorkspaceJson(
+				inputs,
+				activeJobId,
+				view,
+				staticTab,
+				staticData,
+				documentFilename,
+				(id) => !!documentFiles[id],
+			);
+			downloadJson(doc, jsonFilename("Arbeitsbereich"));
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		}
@@ -812,85 +1211,84 @@
 		if (!f) return;
 		try {
 			const data: unknown = JSON.parse(await f.text());
-			if (!isWorkspaceBackup(data)) {
-				error = "Keine gültige CV-Meister-Backup-Datei.";
+			if (!isAppJson(data)) {
+				error = "Keine gültige cv-meister-JSON-Datei.";
 				return;
 			}
-			stagedBackup = { name: f.name, data };
+			const art = readArt(data);
+			if (art !== "arbeitsbereich") {
+				error = `Das ist ein "${art}"-Export. Hier wird ein Arbeitsbereich-Export erwartet.`;
+				return;
+			}
+			stagedBackup = { name: f.name, data: data as WorkspaceDoc };
 		} catch {
 			error = "Datei konnte nicht gelesen werden.";
 		}
 	}
 
+	/** Replaces the whole workspace with the staged file (two-step confirm). */
 	function applyBackup() {
-		const data = stagedBackup?.data;
-		if (!data) return;
-		const s = data.state as {
-			shared?: unknown;
-			jobs?: unknown;
-			cv?: unknown;
-			samples?: unknown;
-			staticData?: unknown;
-			activeJobId?: unknown;
-			view?: unknown;
-			staticTab?: unknown;
-		};
-		if (s.shared && typeof s.shared === "object") shared = s.shared as SharedData;
-		if (typeof shared.gehalt !== "string") shared.gehalt = "";
-		if (shared.einstiegArt !== "datum" && shared.einstiegArt !== "monate")
-			shared.einstiegArt = "monate";
-		if (typeof shared.einstiegDatum !== "string") shared.einstiegDatum = "";
-		if (typeof shared.einstiegMonate !== "string") shared.einstiegMonate = "2";
-		if (Array.isArray(s.jobs) && (s.jobs as unknown[]).length > 0) {
-			jobs = s.jobs as JobData[];
-			for (const j of jobs) {
-				if (!j.letter) j.letter = structuredClone(DEFAULT_LETTER);
-				if (!Array.isArray(j.hiddenSkillIds)) j.hiddenSkillIds = [];
-				if (!Array.isArray(j.hiddenSampleIds)) j.hiddenSampleIds = [];
-				if (!Array.isArray(j.hiddenSkillValues)) j.hiddenSkillValues = [];
-				if (typeof j.emailText !== "string") j.emailText = "";
-				if (typeof j.motivation !== "string") j.motivation = "";
-				if (typeof j.adText !== "string") j.adText = "";
-				if (typeof j.link !== "string") j.link = "";
-				if (typeof j.rolle !== "string") j.rolle = "";
-				if (j.anrede !== "frau" && j.anrede !== "herr" && j.anrede !== "divers")
-					j.anrede = "frau";
-				if (typeof j.accentColor !== "string") j.accentColor = "#4d3e1d";
-				if (typeof j.fuehrerschein !== "boolean") j.fuehrerschein = false;
-			}
+		const staged = stagedBackup;
+		if (!staged) return;
+		const p = readWorkspaceJson(staged.data, shared, staticData);
+
+		if (p.shared) shared = p.shared;
+		if (p.cv) cv = p.cv;
+		if (p.staticData) staticData = p.staticData;
+
+		// The work-sample pool is global and stored once, at the top level.
+		samples = p.samples;
+
+		jobs = p.jobs.map((parsed) =>
+			createJob({ ...parsed.job, id: parsed.job.id, letter: parsed.letter }),
+		);
+
+		// The switch state travels as text, so it can be applied straight onto
+		// the new CV and the new sample pool.
+		p.jobs.forEach((parsed, i) => {
+			const job = jobs[i];
+			if (job) applyFilters(job, cv, samples, parsed);
+		});
+
+		documents = p.documents;
+		documentFiles = {};
+		for (const doc of documents) {
+			const b64 = p.documentBase64[doc.id];
+			if (!b64) continue;
+			const file = dataUrlToFile(b64, documentFilename(doc));
+			if (file) documentFiles[doc.id] = file;
 		}
-		if (s.cv && typeof s.cv === "object") cv = ensureCvIds(s.cv as CvData);
-		if (Array.isArray(s.samples)) samples = s.samples as WorkSample[];
-		if (s.staticData && typeof s.staticData === "object") {
-			staticData = s.staticData as StaticData;
-			if (typeof staticData.samplesDisclaimer !== "string")
-				staticData.samplesDisclaimer = structuredClone(DEFAULT_STATIC).samplesDisclaimer;
-		}
-		if (typeof s.activeJobId === "string" && jobs.some((j) => j.id === s.activeJobId))
-			activeJobId = s.activeJobId as string;
-		if (s.view === "dashboard" || s.view === "detail" || s.view === "static")
-			view = s.view;
-		if (
-			s.staticTab === "stammdaten" ||
-			s.staticTab === "lebenslauf" ||
-			s.staticTab === "erfahrung" ||
-			s.staticTab === "proben"
-		)
-			staticTab = s.staticTab;
-		const fl = data.files;
-		photoFile = backupFileToFile(fl.photo);
-		signatureFile = backupFileToFile(fl.signature);
+
+		photoFile = dataUrlToFile(p.images.foto.base64, p.images.foto.name ?? "profil.png");
+		signatureFile = dataUrlToFile(
+			p.images.unterschrift.base64,
+			p.images.unterschrift.name ?? "unterschrift.png",
+		);
 		sampleFiles = {};
-		for (const [id, entry] of Object.entries(fl.samples ?? {})) {
-			const file = backupFileToFile(entry);
+		for (const [id, b64] of Object.entries(p.sampleBase64)) {
+			const file = dataUrlToFile(b64, `probe-${id}.png`);
 			if (file) sampleFiles[id] = file;
 		}
+
 		jobFiles = {};
-		for (const [id, entry] of Object.entries(fl.logos ?? {})) {
-			if (!jobs.some((j) => j.id === id)) continue;
-			const file = backupFileToFile(entry);
-			if (file) filesFor(id).logo = file;
-		}
+		p.jobs.forEach((parsed, i) => {
+			const job = jobs[i];
+			if (!job) return;
+			const jf = filesFor(job.id);
+			jf.logoUrl = parsed.logoUrl;
+			const file = dataUrlToFile(parsed.logoBase64, parsed.logoName ?? `logo-${job.id}.png`);
+			if (file) jf.logo = file;
+			// A logo that travelled as a URL only still has to be fetched.
+			else if (parsed.logoUrl) void loadLogoFromUrl(parsed.logoUrl, job, true);
+		});
+
+		activeJobId =
+			p.activeIndex !== null && jobs[p.activeIndex]
+				? jobs[p.activeIndex].id
+				: (jobs[0]?.id ?? "");
+		if (p.view === "dashboard" || p.view === "detail" || p.view === "static") view = p.view;
+		if (isStaticTab(p.staticTab)) staticTab = p.staticTab;
+
 		logoNote = "";
 		stagedBackup = null;
 		backupOpen = false;
@@ -909,6 +1307,7 @@
 		jobs = structuredClone(DEFAULT_JOBS);
 		cv = ensureCvIds(structuredClone(DEFAULT_CV));
 		samples = structuredClone(DEFAULT_SAMPLES);
+		documents = structuredClone(DEFAULT_DOCUMENTS);
 		staticData = structuredClone(DEFAULT_STATIC);
 		activeJobId = jobs[0]?.id ?? "";
 		view = "dashboard";
@@ -916,6 +1315,7 @@
 		photoFile = null;
 		signatureFile = null;
 		sampleFiles = {};
+		documentFiles = {};
 		jobFiles = {};
 		logoNote = "";
 		error = "";
@@ -954,10 +1354,21 @@
 		const f = filesFor(activeJob.id);
 		if (!picked) {
 			f.logo = null;
+			f.logoUrl = null;
 			logoNote = "";
 			render();
 			return;
 		}
+		// Same guard as the URL path: a file that is not really an image would be
+		// fed to Typst and fail there with an unrelated message.
+		if (!sniffImage(new Uint8Array(await picked.arrayBuffer()))) {
+			logoNote = "Keine Bilddatei — bitte PNG, JPG, GIF, WebP oder SVG wählen.";
+			render();
+			return;
+		}
+		// A picked file supersedes any URL origin — otherwise the export would
+		// claim a URL that no longer describes what is rendered.
+		f.logoUrl = null;
 		// SVGs are used natively (vector-sharp); rasterization happens only
 		// internally for color extraction.
 		f.logo = picked;
@@ -1010,6 +1421,46 @@
 		return !id || !activeJob.hiddenSampleIds.includes(id);
 	}
 
+	// --- Extra PDFs (global pool, attached to every application) ---
+
+	function addDocument() {
+		documents.push({ id: nid(), name: "" });
+	}
+
+	function removeDocument(id: string | undefined) {
+		const i = documents.findIndex((d) => d.id === id);
+		if (i >= 0) documents.splice(i, 1);
+		if (id) delete documentFiles[id];
+	}
+
+	/**
+	 * Picking a PDF. Anything else is refused: it would be attached under the
+	 * wrong MIME type and could not be opened from the mail preview.
+	 */
+	function onDocumentFile(id: string | undefined, files: FileList | null) {
+		if (!id) return;
+		const file = files?.[0];
+		if (!file) {
+			delete documentFiles[id];
+			return;
+		}
+		if (!isPdf(file)) {
+			error = `„${file.name}“ ist keine PDF-Datei.`;
+			return;
+		}
+		error = "";
+		documentFiles[id] = file;
+		// Pre-fill the name from the file so the attachment is recognisable in
+		// the mail preview; a name the user already typed is left alone.
+		const doc = documents.find((d) => d.id === id);
+		if (doc && !doc.name.trim()) doc.name = file.name.replace(/\.pdf$/i, "");
+	}
+
+	/** A row without a file has nothing to attach — flagged in the PDF tab. */
+	function documentReady(id: string | undefined): boolean {
+		return !!id && !!documentFiles[id];
+	}
+
 	// --- CV helpers (global CV, per-job filter) ---
 
 	function move<T>(arr: T[], i: number, dir: -1 | 1) {
@@ -1053,26 +1504,6 @@
 
 	function skillVisible(id: string | undefined): boolean {
 		return !id || !activeJob.hiddenSkillIds.includes(id);
-	}
-
-	/**
-	 * One entry per non-empty line. Duplicates collapse: the same value twice
-	 * would otherwise break the keyed {#each} below (each_key_duplicate) and
-	 * could never be toggled independently.
-	 *
-	 * The list is keyed by index, not by value: the same string may legitimately
-	 * appear in two different groups, and only the dedupe above is per group.
-	 */
-	function skillLines(values: string): string[] {
-		const seen = new Set<string>();
-		const out: string[] = [];
-		for (const line of values.split(/\r?\n/)) {
-			const value = line.trim();
-			if (!value || seen.has(value)) continue;
-			seen.add(value);
-			out.push(value);
-		}
-		return out;
 	}
 
 	function toggleSkillValue(groupId: string | undefined, value: string) {
@@ -1141,8 +1572,14 @@
 		void JSON.stringify(jobs);
 		void JSON.stringify(cv);
 		void JSON.stringify(samples);
+		void JSON.stringify(documents);
 		void JSON.stringify(staticData);
 		void JSON.stringify(jobFiles);
+		// The file maps have to be read here as well: they are otherwise only
+		// touched inside collectState(), so picking a file scheduled neither a
+		// save nor a re-render and the upload was lost until some other edit.
+		void JSON.stringify(sampleFiles);
+		void JSON.stringify(documentFiles);
 		dlog("effect fired");
 		if (ready) scheduleRender();
 		scheduleSave();
@@ -1162,13 +1599,6 @@
 		if (previewDoc === "mail" && !mailAvailable) previewDoc = "letter";
 	});
 
-	const staticTabs: { id: StaticTab; label: string }[] = [
-		{ id: "stammdaten", label: "Stammdaten" },
-		{ id: "lebenslauf", label: "Lebenslauf" },
-		{ id: "erfahrung", label: "Erfahrung" },
-		{ id: "proben", label: "Arbeitsproben" },
-	];
-
 	const inputCls =
 		"w-full px-2.5 py-1.5 bg-[#0a0f1d] border border-[#1e293b] rounded text-xs text-slate-200 focus:outline-none focus:border-blue-500";
 	const labelCls = "block text-[10px] font-semibold text-slate-400 mb-1";
@@ -1186,17 +1616,26 @@
 
 {#if editorActive}
 	<div class="min-h-screen bg-[#090d16] text-slate-100 flex h-screen overflow-hidden">
-	{#snippet fileButton(currentName: string | null, onchange: (files: FileList | null) => void)}
+	{#snippet fileButton(
+		currentName: string | null,
+		onchange: (files: FileList | null) => void,
+		accept = "image/*",
+		label = "Datei wählen",
+	)}
 		<div class="flex items-center gap-2">
 			<label
 				class="cursor-pointer text-xs font-medium px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition shrink-0"
 			>
-				Datei wählen
+				{label}
 				<input
 					type="file"
-					accept="image/*"
+					{accept}
 					class="hidden"
-					onchange={(e) => onchange(e.currentTarget.files)}
+					onchange={(e) => {
+						onchange(e.currentTarget.files);
+						// Reset so picking the same file again still fires `change`.
+						e.currentTarget.value = "";
+					}}
 				/>
 			</label>
 			<span class="text-[10px] text-slate-500 truncate"
@@ -1449,6 +1888,21 @@
 								← Zurück zur Übersicht
 							</button>
 							<div class="flex items-center space-x-2.5">
+								<button
+									onclick={() => void copyApplicationJson()}
+									title="Diese Bewerbung als JSON in die Zwischenablage kopieren — selbstbeschreibend, ohne Bilddaten. Zum Einfügen in einen Prompt."
+									class="text-xs font-medium px-3 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 transition"
+								>
+									{appJsonCopied ? "✓ Kopiert!" : "JSON kopieren"}
+								</button>
+								<button
+									onclick={() => void importApplicationJson()}
+									title="JSON aus der Zwischenablage einlesen — ersetzt diese Bewerbung (Felder, Anschreiben, Auswahl)"
+									class="text-xs font-medium px-3 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 transition"
+								>
+									JSON importieren
+								</button>
+								<span class="w-px h-5 bg-[#1e293b]"></span>
 								<span
 									class="px-2.5 py-0.5 rounded text-[10px] font-mono border {statusCls(
 										activeJob.status,
@@ -1589,16 +2043,28 @@
 												class="h-9 w-full rounded border border-[#1e293b] bg-[#0a0f1d]"
 											/>
 										</label>
-										<label>
+										<div class="col-span-2">
 											<span class={labelCls}>Firmenlogo</span>
 											{@render fileButton(
 												jobFiles[activeJob.id]?.logo?.name ?? null,
 												(f) => onLogoSelect(f),
 											)}
+											<div class="flex items-center gap-2 mt-1.5">
+												<button
+													onclick={openLogoUrl}
+													title="Logo von einer URL laden (das ist der Weg, den eine KI im JSON setzen kann)"
+													class="text-[11px] font-medium px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition shrink-0"
+												>
+													URL wählen
+												</button>
+												<span class="text-[10px] text-slate-500 truncate">
+													{jobFiles[activeJob.id]?.logoUrl ?? "Keine URL"}
+												</span>
+											</div>
 											{#if logoNote}
 												<p class="text-[10px] text-slate-500 mt-1">{logoNote}</p>
 											{/if}
-										</label>
+										</div>
 										<label class="col-span-2">
 											<span class={labelCls}>Stellenausschreibungstext</span>
 											<textarea
@@ -1763,23 +2229,18 @@
 						<div class="flex items-center gap-2">
 							<button
 								onclick={copyCvJson}
+								title="Lebenslauf-JSON in die Zwischenablage kopieren (z. B. für eine KI)"
 								class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium py-1.5 px-3 rounded transition-colors"
 							>
 								{cvCopied ? "✓ Kopiert!" : "JSON kopieren"}
 							</button>
 							<button
-								onclick={triggerCvImport}
+								onclick={() => void importCvJson()}
+								title="Lebenslauf-JSON aus der Zwischenablage einlesen (ersetzt den Lebenslauf)"
 								class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium py-1.5 px-3 rounded transition-colors"
 							>
-								JSON einfügen
+								JSON importieren
 							</button>
-							<input
-								id="cv-import-input"
-								type="file"
-								accept=".json,application/json"
-								class="hidden"
-								onchange={(e) => onCvImportFile(e.currentTarget.files)}
-							/>
 							{#if cvImportError}
 								<span class="text-xs text-red-400">{cvImportError}</span>
 							{/if}
@@ -2004,6 +2465,77 @@
 							+ Arbeitsprobe hinzufügen
 						</button>
 					</div>
+				{:else if staticTab === "pdf"}
+					<div class="space-y-4 max-w-5xl">
+						<div class="{cardCls} space-y-2">
+							<h4 class={hCls}>Zusätzliche PDFs</h4>
+							<p class="text-[11px] text-slate-400 leading-relaxed">
+								Zeugnisse, Nachweise, Zertifikate. Diese PDFs werden an
+								<strong class="text-slate-300">jede</strong> Bewerbungs-Mail angehängt: in der
+								Mail-Vorschau, in der .eml-Datei und beim Versand über Gmail. Sie gehen
+								außerdem in den Arbeitsbereich-Export (JSON, als Base64) mit ein.
+							</p>
+						</div>
+						{#each documents as doc, di (doc.id)}
+							<div class="{cardCls} space-y-3">
+								<div class="flex items-center justify-between">
+									<span class="text-xs font-semibold text-slate-500">PDF</span>
+									<div class="flex gap-2">
+										<button
+											onclick={() => move(documents, di, -1)}
+											disabled={di === 0}
+											class="text-xs text-slate-400 hover:underline disabled:opacity-30"
+											title="Nach oben"
+										>
+											↑
+										</button>
+										<button
+											onclick={() => move(documents, di, 1)}
+											disabled={di === documents.length - 1}
+											class="text-xs text-slate-400 hover:underline disabled:opacity-30"
+											title="Nach unten"
+										>
+											↓
+										</button>
+										<button
+											onclick={() => removeDocument(doc.id)}
+											class="text-xs text-red-400 hover:underline"
+										>
+											Entfernen
+										</button>
+									</div>
+								</div>
+								<input
+									bind:value={doc.name}
+									placeholder="Name (z. B. Zeugnis Abitur)"
+									class={inputCls}
+								/>
+								{@render fileButton(
+									documentFiles[doc.id ?? ""]?.name ?? null,
+									(f) => onDocumentFile(doc.id, f),
+									"application/pdf",
+									"PDF wählen",
+								)}
+								{#if documentReady(doc.id)}
+									<p class="text-[10px] text-slate-500">
+										Wird angehängt als <span class="font-mono text-slate-400"
+											>{documentFilename(doc)}</span
+										>
+									</p>
+								{:else}
+									<p class="text-[10px] text-amber-400/80">
+										Ohne PDF-Datei wird nichts angehängt.
+									</p>
+								{/if}
+							</div>
+						{/each}
+						<button
+							onclick={addDocument}
+							class="text-xs font-medium border border-dashed border-[#1e293b] rounded py-2 text-slate-400 hover:bg-slate-800/50 w-full"
+						>
+							+ PDF hinzufügen
+						</button>
+					</div>
 				{:else if staticTab === "erfahrung"}
 					<div class="space-y-4 max-w-5xl">
 						<div class="{cardCls} space-y-2">
@@ -2159,7 +2691,7 @@
 						<hr class="border-neutral-200" />
 						<p class="whitespace-pre-wrap leading-relaxed">{composeMailBody(shared, activeJob, activeJob.letter)}</p>
 						<div class="space-y-2">
-							{#each mailAttachments() as att (att.name)}
+							{#each mailAttachments() as att (att.kind)}
 								<div class="flex items-center gap-3 rounded border border-neutral-200 bg-neutral-50 p-2">
 									<span
 										class="flex items-center justify-center w-9 h-9 rounded bg-red-600 text-white text-[10px] font-bold shrink-0"
@@ -2205,7 +2737,7 @@
 									mailSizes.letter == null ||
 									mailSizes.cv == null}
 								title={mailSizes.letter != null && mailSizes.cv != null
-									? "E-Mail mit beiden PDFs als .eml herunterladen"
+									? "E-Mail mit allen Anhängen als .eml herunterladen"
 									: "Anhänge werden berechnet…"}
 								class="text-xs font-medium px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 text-white transition"
 							>
@@ -2273,13 +2805,93 @@
 		</div>
 	{/if}
 
+	{#if stagedAppImport}
+		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3">
+			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-md w-full p-4 space-y-3">
+				<h3 class="text-xs font-bold text-slate-100">Bewerbung aus JSON ersetzen?</h3>
+				<p class="text-[11px] text-slate-400 break-all">Quelle: {stagedAppImport.quelle}</p>
+				<p class="text-xs text-slate-300">
+					Der Export enthält nur, was zu dieser Bewerbung gehört. Ersetzt wird
+					<span class="font-semibold">die geöffnete Bewerbung</span>:
+				</p>
+				<ul class="text-[11px] text-slate-400 space-y-0.5 list-disc pl-4">
+					<li>Felder, Anschreiben und die Ein-/Aus-Auswahl dieser Bewerbung</li>
+					<li>Stammdaten (global)</li>
+				</ul>
+				<p class="text-[11px] text-slate-500">
+					Lebenslauf, Arbeitsproben und zusätzliche PDFs sind global bzw. lokal hochgeladen und
+					bleiben unangetastet. Das Logo wird aus der URL in der Datei geladen.
+				</p>
+				{#if appImportError}
+					<p class="text-[11px] text-red-400">{appImportError}</p>
+				{/if}
+				<div class="flex justify-end gap-2">
+					<button
+						onclick={() => (stagedAppImport = null)}
+						class="px-3 py-1.5 bg-slate-800 text-slate-300 rounded text-xs"
+					>
+						Abbrechen
+					</button>
+					<button
+						onclick={applyApplicationImport}
+						class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold transition"
+					>
+						Ersetzen
+					</button>
+				</div>
+			</div>
+		</div>
+	{/if}
+
+	{#if logoUrlOpen}
+		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3">
+			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-md w-full p-4 space-y-3">
+				<h3 class="text-xs font-bold text-slate-100">Logo von URL laden</h3>
+				<p class="text-[11px] text-slate-400">
+					Die App lädt das Bild von dieser Adresse und übernimmt es als Firmenlogo. Im
+					Bewerbungs-JSON steht danach nur diese URL — keine Bilddaten.
+				</p>
+				<input
+					bind:value={logoUrlInput}
+					placeholder="https://…/logo.png"
+					class="{inputCls} font-mono"
+					onkeydown={(e) => {
+						if (e.key === "Enter") void applyLogoUrl();
+					}}
+				/>
+				<div class="flex justify-end gap-2">
+					<button
+						onclick={() => (logoUrlOpen = false)}
+						class="px-3 py-1.5 bg-slate-800 text-slate-300 rounded text-xs"
+					>
+						Abbrechen
+					</button>
+					<button
+						onclick={() => void applyLogoUrl()}
+						disabled={logoUrlBusy || !logoUrlInput.trim()}
+						class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
+					>
+						{logoUrlBusy ? "Lädt …" : "Laden"}
+					</button>
+				</div>
+			</div>
+		</div>
+	{/if}
+
 	{#if backupOpen}
 		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3">
 			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-sm w-full p-4 space-y-3">
 				<h3 class="text-xs font-bold text-slate-100">Arbeitsbereich (JSON, inkl. Bilder)</h3>
 				<p class="text-[11px] text-slate-400">
 					Alles außer generierten PDFs/EMLs: Bewerbungen, Stammdaten, Lebenslauf,
-					Arbeitsproben, Erfahrung.
+					Arbeitsproben, zusätzliche PDFs, Erfahrung.
+				</p>
+				<p class="text-[11px] text-slate-500">
+					Gleiches Format wie der Bewerbungs-Export und selbstbeschreibend
+					(<span class="font-mono">label</span>/<span class="font-mono">_comment</span>/<span
+						class="font-mono">info</span
+					>/<span class="font-mono">value</span>). Unterschied: nur hier stecken die Bild- und
+					PDF-Daten als Base64 drin.
 				</p>
 				<button
 					onclick={exportWorkspace}
@@ -2292,6 +2904,7 @@
 				>
 					Importieren (Datei wählen)
 					<input
+						id="backup-import-input"
 						type="file"
 						accept=".json,application/json"
 						class="hidden"
@@ -2312,8 +2925,8 @@
 					<div class="rounded border border-red-500/40 bg-red-500/10 p-3 space-y-2">
 						<p class="text-xs text-slate-200">
 							Wirklich alles auf die Platzhalter (Max Mustermann / Template Firma)
-							zurücksetzen? Bewerbungen, Lebenslauf, Arbeitsproben und Bilder werden
-							ersetzt.
+							zurücksetzen? Bewerbungen, Lebenslauf, Arbeitsproben, zusätzliche PDFs
+							und Bilder werden ersetzt.
 						</p>
 						<div class="flex justify-end gap-2">
 							<button

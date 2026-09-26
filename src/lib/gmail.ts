@@ -121,16 +121,55 @@ export function base64UrlEncode(bytes: Uint8Array): string {
 	return base64Encode(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** Builds an RFC 2822 multipart message (UTF-8 text + attachments). */
+/**
+ * Renders a plain-text body as minimal, safe HTML.
+ *
+ * Why this exists: the message bytes can be perfectly RFC-conform (CRLF
+ * throughout, base64 text part) and classic Outlook will *still* show the body
+ * as one line, because "Remove extra line breaks in plain text messages" is
+ * enabled by default and strips every single line break (two or more successive
+ * breaks survive). The characters are not lost, so copying the text into another
+ * program brings the breaks back — which is exactly the confusing symptom users
+ * report. Outlook only does this to `text/plain`, so the durable fix is to offer
+ * an HTML alternative it can render instead; the plain part stays for
+ * text-only clients.
+ */
+export function textToHtml(text: string): string {
+	const escaped = text
+		.replace(/\r\n?/g, "\n")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
+	// Blank lines separate paragraphs, single breaks stay hard breaks.
+	const blocks = escaped
+		.split(/\n{2,}/)
+		.map((p) => `<p style="margin:0 0 1em 0;">${p.replace(/\n/g, "<br>")}</p>`);
+	return (
+		'<!DOCTYPE html><html><head><meta charset="utf-8"></head>' +
+		'<body style="font-family:Arial,Helvetica,sans-serif;font-size:11pt;' +
+		`line-height:1.45;color:#111111;">${blocks.join("")}</body></html>`
+	);
+}
+
+/**
+ * Builds an RFC 2822 multipart message (UTF-8 text + attachments).
+ *
+ * Shape: multipart/mixed → [ multipart/alternative (text, html), attachments ].
+ * Both bodies are base64 so charset and line endings survive the wire untouched.
+ */
 export function buildMimeMessage(
 	to: string,
 	subject: string,
 	bodyText: string,
 	attachments: MailAttachment[],
 ): string {
-	const boundary = `CVMEISTER-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
-	// Text part as base64: immune to charset/line-ending mangling on the way.
-	const body = base64Lines(new TextEncoder().encode(bodyText.replace(/\r?\n/g, "\r\n")));
+	const tag = () => Math.floor(Math.random() * 1e6).toString(36);
+	const boundary = `CVMEISTER-${Date.now().toString(36)}-${tag()}`;
+	const alt = `CVMEISTER-ALT-${tag()}`;
+	// One CRLF-normalised body, rendered twice (plain text + HTML).
+	const crlfBody = bodyText.replace(/\r?\n/g, "\r\n");
+	const textBody = base64Lines(new TextEncoder().encode(crlfBody));
+	const htmlBody = base64Lines(new TextEncoder().encode(textToHtml(crlfBody)));
 	const lines = [
 		`To: ${to}`,
 		`Subject: ${encodeHeaderWords(subject)}`,
@@ -138,10 +177,21 @@ export function buildMimeMessage(
 		`Content-Type: multipart/mixed; boundary="${boundary}"`,
 		"",
 		`--${boundary}`,
+		`Content-Type: multipart/alternative; boundary="${alt}"`,
+		"",
+		`--${alt}`,
 		'Content-Type: text/plain; charset="UTF-8"',
 		"Content-Transfer-Encoding: base64",
 		"",
-		body,
+		textBody,
+		"",
+		`--${alt}`,
+		'Content-Type: text/html; charset="UTF-8"',
+		"Content-Transfer-Encoding: base64",
+		"",
+		htmlBody,
+		"",
+		`--${alt}--`,
 		"",
 	];
 	for (const a of attachments) {
