@@ -111,6 +111,52 @@
 		return jobFiles[id];
 	}
 
+	/**
+	 * Object URL per job for the logo shown in the sidebar. A logo is a `File`,
+	 * and an `<img>` needs a URL, so one is created here and revoked again as soon
+	 * as the logo is replaced or the job goes away.
+	 */
+	let logoUrls = $state<Record<string, string>>({});
+
+	/** Plain bookkeeping for the effect below — deliberately not `$state`, so it
+	 * cannot make the effect subscribe to what it writes. */
+	const logoCache = new Map<string, { file: File; url: string }>();
+	let lastLogoKey = "";
+
+	$effect(() => {
+		void JSON.stringify(jobFiles);
+		const next: Record<string, string> = {};
+		const live = new Set<string>();
+		for (const [id, f] of Object.entries(jobFiles)) {
+			live.add(id);
+			const file = f?.logo;
+			if (!file) continue;
+			// Reuse the URL while it is still the same file — a fresh URL on every
+			// save would reload the image and make the row flicker.
+			const cached = logoCache.get(id);
+			if (cached && cached.file === file) {
+				next[id] = cached.url;
+			} else {
+				if (cached) URL.revokeObjectURL(cached.url);
+				const url = URL.createObjectURL(file);
+				logoCache.set(id, { file, url });
+				next[id] = url;
+			}
+		}
+		for (const [id, cached] of [...logoCache]) {
+			if (live.has(id) && next[id]) continue;
+			URL.revokeObjectURL(cached.url);
+			logoCache.delete(id);
+		}
+		const key = Object.keys(next)
+			.sort()
+			.map((id) => `${id}:${next[id]}`)
+			.join("|");
+		if (key === lastLogoKey) return;
+		lastLogoKey = key;
+		logoUrls = next;
+	});
+
 	let pages = $state<string[]>([]);
 	let warnings = $state<string[]>([]);
 	let error = $state("");
@@ -1693,8 +1739,10 @@
 					>
 				</button>
 
-				<!-- Steht über der Liste und scrollt nicht mit. -->
-				<div class="pl-4 shrink-0">
+				<!-- Steht über der Liste und scrollt nicht mit. Keine Einrückung:
+				     die Zeilen sollen bündig mit „Statische Daten" beginnen, das
+				     spart in der schmalen Leiste Breite. -->
+				<div class="shrink-0">
 					<button
 						onclick={addJob}
 						class="w-full text-left px-3 py-1.5 rounded-md text-xs text-slate-600 hover:text-slate-300 hover:bg-slate-800/50 transition"
@@ -1704,7 +1752,7 @@
 				</div>
 
 				<!-- Wird die Liste zu lang, scrollt nur sie. -->
-				<div id="job-list" class="pl-4 space-y-0.5 flex-1 overflow-y-auto min-h-0 scroll-dark">
+				<div id="job-list" class="space-y-0.5 flex-1 overflow-y-auto min-h-0 scroll-dark">
 					{#each jobs as j (j.id)}
 						<button
 							onclick={() => selectJob(j.id)}
@@ -1712,12 +1760,22 @@
 								? 'text-blue-300 bg-blue-600/10'
 								: 'text-slate-500 hover:text-slate-200 hover:bg-slate-800/50'}"
 						>
-							<span
-								class="w-6 h-6 rounded border flex items-center justify-center font-bold text-[10px] shrink-0"
-								style="background: {safeAccentColor(j.accentColor)}22; border-color: {safeAccentColor(j.accentColor)}55; color: {safeAccentColor(j.accentColor)};"
-							>
-								{initials(j.firma.trim() || "?")}
-							</span>
+							{#if logoUrls[j.id]}
+								<!-- Das echte Firmenlogo schlägt die Initialen. `object-contain`
+								     hält ein breites Logo in der quadratischen Zelle. -->
+								<img
+									src={logoUrls[j.id]}
+									alt=""
+									class="w-6 h-6 rounded border border-[#1e293b] object-contain bg-white/5 shrink-0"
+								/>
+							{:else}
+								<span
+									class="w-6 h-6 rounded border flex items-center justify-center font-bold text-[10px] shrink-0"
+									style="background: {safeAccentColor(j.accentColor)}22; border-color: {safeAccentColor(j.accentColor)}55; color: {safeAccentColor(j.accentColor)};"
+								>
+									{initials(j.firma.trim() || "?")}
+								</span>
+							{/if}
 							<span class="truncate flex-1 text-left">{j.firma.trim() || "Neue Firma"}</span>
 							<span
 								class="ml-2 px-1.5 py-0.5 rounded text-[9px] font-mono border shrink-0 {statusCls(
