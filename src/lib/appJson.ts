@@ -26,7 +26,7 @@ import { JOB_STATUSES, type Anrede, type JobData, type JobStatus } from "./job.j
 import type { LetterData, WorkSample } from "./letter.js";
 import type { SharedData } from "./shared.js";
 import type { CvData, CvEntry, CvSection } from "./cv.js";
-import { ensureCvIds, skillLines, skillValueKey } from "./cv.js";
+import { normalizeCv, isToggleable } from "./cv.js";
 import type { ExtraDocument, StaticData } from "./static.js";
 
 export const JSON_FORMAT = "cv-meister";
@@ -93,7 +93,11 @@ export interface CvSectionNode {
 		firma: JsonField<string>;
 		details: JsonField<string>;
 	}[];
-	kenntnisse: { kategorie: JsonField<string>; werte: JsonField<string> }[];
+	kenntnisse: {
+		kategorie: JsonField<string>;
+		werte: JsonField<string>;
+		umschaltbar: JsonField<boolean>;
+	}[];
 }
 
 export interface CvNode {
@@ -154,7 +158,6 @@ export interface ApplicationNode {
 		fuehrerschein: JsonField<boolean>;
 		ausgeschalteteArbeitsproben: string[];
 		ausgeschalteteKenntnisse: { bereich: string; kategorie: string }[];
-		ausgeschalteteWerte: { bereich: string; kategorie: string; wert: string }[];
 	};
 }
 
@@ -418,6 +421,11 @@ export function cvNode(cv: CvData): CvNode {
 			kenntnisse: s.skills.map((g) => ({
 				kategorie: field("Kategorie (z. B. Sprachen)", g.category),
 				werte: field("Werte", g.values, "Ein Wert pro Zeile, *Wert* = fett"),
+				umschaltbar: field(
+					"Pro Bewerbung umschaltbar",
+					isToggleable(g),
+					"Nur umschaltbare Kategorien erscheinen im Lebenslauf-Filter einer Bewerbung. Alles andere steht immer im Lebenslauf.",
+				),
 			})),
 		})),
 	};
@@ -477,19 +485,14 @@ export function filterAsText(
 	job: JobData,
 	cv: CvData,
 	samples: WorkSample[],
-): Pick<ParsedApplication, "hiddenSkills" | "hiddenValues" | "hiddenSampleTitles"> {
+): Pick<ParsedApplication, "hiddenSkills" | "hiddenSampleTitles"> {
 	return {
+		// Only marked categories can be off, so only those are reported: a stale
+		// id must not make a fixed category look switched off.
 		hiddenSkills: cv.sections.flatMap((s) =>
 			s.skills
-				.filter((g) => g.id && job.hiddenSkillIds.includes(g.id))
+				.filter((g) => isToggleable(g) && g.id && job.hiddenSkillIds.includes(g.id))
 				.map((g) => ({ bereich: s.title, kategorie: g.category })),
-		),
-		hiddenValues: cv.sections.flatMap((s) =>
-			s.skills.flatMap((g) =>
-				skillLines(g.values)
-					.filter((v) => job.hiddenSkillValues.includes(skillValueKey(g.id, v)))
-					.map((v) => ({ bereich: s.title, kategorie: g.category, wert: v })),
-			),
 		),
 		hiddenSampleTitles: samples
 			.filter((s) => s.id && job.hiddenSampleIds.includes(s.id))
@@ -498,7 +501,10 @@ export function filterAsText(
 }
 
 export const AUSWAHL_HINWEIS =
-	"Was in DIESEM Lebenslauf ausgeblendet ist. Alles, was hier NICHT steht, ist eingeschaltet. Die Zuordnung passiert beim Import über die Texte (Abschnitt/Kategorie/Wert bzw. Probentitel), nicht über IDs — Umbenennen setzt die Auswahl für den Eintrag zurück.";
+	"Was in DIESEM Lebenslauf ausgeblendet ist. Alles, was hier NICHT steht, ist eingeschaltet. "
+	+ "Abschalten lassen sich nur Kenntnisse, die im Lebenslauf als „umschaltbar“ markiert sind "
+	+ "— alle anderen stehen immer drin. Die Zuordnung passiert beim Import über die Texte "
+	+ "(Abschnitt/Kategorie bzw. Probentitel), nicht über IDs — Umbenennen setzt die Auswahl für den Eintrag zurück.";
 
 /**
  * Hint for the mail text. Shared between the JSON and the UI so the two cannot
@@ -589,7 +595,6 @@ function applicationNode(input: ApplicationInput, withImages = false) {
 			),
 			ausgeschalteteArbeitsproben: filter.hiddenSampleTitles,
 			ausgeschalteteKenntnisse: filter.hiddenSkills,
-			ausgeschalteteWerte: filter.hiddenValues,
 		},
 	};
 }
@@ -706,7 +711,6 @@ export interface ParsedApplication {
 	letter: LetterData;
 	hiddenSampleTitles: string[];
 	hiddenSkills: { bereich: string; kategorie: string }[];
-	hiddenValues: { bereich: string; kategorie: string; wert: string }[];
 	shared: SharedData | null;
 	logoUrl: string | null;
 	logoName: string | null;
@@ -784,7 +788,13 @@ function readCvSection(node: unknown): CvSection {
 		}),
 		skills: groups.map((raw) => {
 			const g = (raw ?? {}) as Record<string, unknown>;
-			return { category: readString(g.kategorie), values: readString(g.werte) };
+			return {
+				category: readString(g.kategorie),
+				values: readString(g.werte),
+				// Absent in files written before the flag existed: a category is
+				// switchable only once it has been marked as such.
+				toggleable: readBool(g.umschaltbar, false),
+			};
 		}),
 	};
 }
@@ -793,7 +803,7 @@ function readCvNode(node: unknown): CvData | null {
 	if (!node || typeof node !== "object") return null;
 	const n = node as Record<string, unknown>;
 	if (!Array.isArray(n.abschnitte)) return null;
-	return ensureCvIds({
+	return normalizeCv({
 		fuehrerschein: readString(n.fuehrerschein),
 		sections: n.abschnitte.map(readCvSection),
 	});
@@ -856,7 +866,6 @@ export function readApplicationNode(node: unknown, fallbackJobId: string): Parse
 			closing: readString(anschreiben.grussformel, "Mit freundlichen Grüßen"),
 		},
 		hiddenSkillIds: [],
-		hiddenSkillValues: [],
 		hiddenSampleIds: [],
 		fuehrerschein: readBool(auswahl.fuehrerschein, false),
 	};
@@ -864,7 +873,6 @@ export function readApplicationNode(node: unknown, fallbackJobId: string): Parse
 	// Both the current and the legacy key names are read.
 	const sampleTitles = auswahl.ausgeschalteteArbeitsproben ?? auswahl.ausgeblendeteProben;
 	const skillEntries = auswahl.ausgeschalteteKenntnisse ?? auswahl.ausgeblendeteKenntnisse;
-	const valueEntries = auswahl.ausgeschalteteWerte ?? auswahl.ausgeblendeteWerte;
 
 	const hiddenSampleTitles = Array.isArray(sampleTitles)
 		? sampleTitles.filter((t): t is string => typeof t === "string")
@@ -875,20 +883,11 @@ export function readApplicationNode(node: unknown, fallbackJobId: string): Parse
 				kategorie: readString(e.kategorie),
 			}))
 		: [];
-	const hiddenValues = Array.isArray(valueEntries)
-		? (valueEntries as Record<string, unknown>[]).map((e) => ({
-				bereich: readString(e.bereich),
-				kategorie: readString(e.kategorie),
-				wert: readString(e.wert),
-			}))
-		: [];
-
 	return {
 		job,
 		letter: job.letter as LetterData,
 		hiddenSampleTitles,
 		hiddenSkills,
-		hiddenValues,
 		shared: null,
 		logoUrl: logo.url,
 		logoName: logo.name,
@@ -988,10 +987,9 @@ export function applyFilters(
 	job: JobData,
 	cv: CvData,
 	samples: WorkSample[],
-	parsed: Pick<ParsedApplication, "hiddenSkills" | "hiddenValues" | "hiddenSampleTitles">,
+	parsed: Pick<ParsedApplication, "hiddenSkills" | "hiddenSampleTitles">,
 ): void {
 	job.hiddenSkillIds = [];
-	job.hiddenSkillValues = [];
 	job.hiddenSampleIds = [];
 
 	for (const { bereich, kategorie } of parsed.hiddenSkills) {
@@ -999,16 +997,6 @@ export function applyFilters(
 			if (s.title !== bereich) continue;
 			for (const g of s.skills) {
 				if (g.category === kategorie && g.id) job.hiddenSkillIds.push(g.id);
-			}
-		}
-	}
-	for (const { bereich, kategorie, wert } of parsed.hiddenValues) {
-		for (const s of cv.sections) {
-			if (s.title !== bereich) continue;
-			for (const g of s.skills) {
-				if (g.category !== kategorie) continue;
-				if (!skillLines(g.values).includes(wert)) continue;
-				job.hiddenSkillValues.push(skillValueKey(g.id, wert));
 			}
 		}
 	}

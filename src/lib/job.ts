@@ -49,8 +49,6 @@ export interface JobData {
 	fuehrerschein: boolean;
 	/** CV skill-group ids excluded from this job's CV. */
 	hiddenSkillIds: string[];
-	/** Single skill values excluded, as "groupId::value". */
-	hiddenSkillValues: string[];
 	/** Work-sample ids excluded from this job's letter. */
 	hiddenSampleIds: string[];
 
@@ -79,7 +77,6 @@ export function createJob(partial: Partial<JobData> = {}): JobData {
 		fuehrerschein: false,
 		hiddenSkillIds: [],
 		hiddenSampleIds: [],
-		hiddenSkillValues: [],
 		letter: structuredClone(DEFAULT_LETTER),
 		...partial,
 	};

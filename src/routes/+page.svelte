@@ -2,7 +2,7 @@
 	import { onMount, tick } from "svelte";
 	import { compileLetter, compileLetterPdf, compileCv, compileCvPdf } from "$lib/letterCompiler";
 	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, contactGreeting, safeAccentColor, type LetterData, type WorkSample } from "$lib/letter";
-	import { DEFAULT_CV, ensureCvIds, skillLines, skillValueKey, type CvData } from "$lib/cv";
+	import { DEFAULT_CV, normalizeCv, skillLines, toggleableGroups, type CvData } from "$lib/cv";
 	import { DEFAULT_SHARED, einstiegText, nid, type SharedData } from "$lib/shared";
 	import {
 		DEFAULT_DOCUMENTS,
@@ -72,7 +72,9 @@
 	let view = $state<View>("dashboard");
 	let shared = $state<SharedData>(structuredClone(DEFAULT_SHARED));
 	let jobs = $state<JobData[]>(structuredClone(DEFAULT_JOBS));
-	let cv = $state<CvData>(ensureCvIds(structuredClone(DEFAULT_CV)));
+	let cv = $state<CvData>(normalizeCv(structuredClone(DEFAULT_CV)));
+	/** Only categories marked as switchable appear in a job's CV filter. */
+	let filterSkillGroups = $derived(toggleableGroups(cv));
 	let samples = $state<WorkSample[]>(structuredClone(DEFAULT_SAMPLES));
 	/** Extra PDFs attached to every application (Statische Daten → PDF). */
 	let documents = $state<ExtraDocument[]>(structuredClone(DEFAULT_DOCUMENTS));
@@ -416,7 +418,6 @@
 					if (!j.letter) j.letter = structuredClone(DEFAULT_LETTER);
 					if (!Array.isArray(j.hiddenSkillIds)) j.hiddenSkillIds = [];
 					if (!Array.isArray(j.hiddenSampleIds)) j.hiddenSampleIds = [];
-					if (!Array.isArray(j.hiddenSkillValues)) j.hiddenSkillValues = [];
 					if (typeof j.emailText !== "string") j.emailText = "";
 					if (typeof j.motivation !== "string") j.motivation = "";
 					if (typeof j.adText !== "string") j.adText = "";
@@ -428,7 +429,7 @@
 					if (typeof j.fuehrerschein !== "boolean") j.fuehrerschein = false;
 				}
 			}
-			if (s.cv && typeof s.cv === "object") cv = ensureCvIds(s.cv as CvData);
+			if (s.cv && typeof s.cv === "object") cv = normalizeCv(s.cv as CvData);
 			if (Array.isArray(s.samples)) samples = s.samples as WorkSample[];
 			if (Array.isArray(s.documents)) documents = ensureDocumentIds(s.documents as ExtraDocument[]);
 			if (s.staticData && typeof s.staticData === "object")
@@ -1322,7 +1323,7 @@
 	function resetToPlaceholders() {
 		shared = structuredClone(DEFAULT_SHARED);
 		jobs = structuredClone(DEFAULT_JOBS);
-		cv = ensureCvIds(structuredClone(DEFAULT_CV));
+		cv = normalizeCv(structuredClone(DEFAULT_CV));
 		samples = structuredClone(DEFAULT_SAMPLES);
 		documents = structuredClone(DEFAULT_DOCUMENTS);
 		staticData = structuredClone(DEFAULT_STATIC);
@@ -1507,7 +1508,7 @@
 	}
 
 	function addSkill(si: number) {
-		cv.sections[si].skills.push({ id: nid(), category: "", values: "" });
+		cv.sections[si].skills.push({ id: nid(), category: "", values: "", toggleable: false });
 	}
 
 	function removeSkill(si: number, gi: number) {
@@ -1524,18 +1525,6 @@
 
 	function skillVisible(id: string | undefined): boolean {
 		return !id || !activeJob.hiddenSkillIds.includes(id);
-	}
-
-	function toggleSkillValue(groupId: string | undefined, value: string) {
-		const key = skillValueKey(groupId, value);
-		const h = activeJob.hiddenSkillValues;
-		const i = h.indexOf(key);
-		if (i >= 0) h.splice(i, 1);
-		else h.push(key);
-	}
-
-	function skillValueVisible(groupId: string | undefined, value: string): boolean {
-		return !activeJob.hiddenSkillValues.includes(skillValueKey(groupId, value));
 	}
 
 	function initials(name: string): string {
@@ -2201,16 +2190,21 @@
 									</label>
 
 									<div class="space-y-2">
-										<p class="text-[10px] font-semibold text-slate-400 uppercase">Skills ein/aus:</p>
-										{#each cv.sections as sec (sec.id ?? sec.title)}
-											{#each sec.skills as group (group.id ?? group.category)}
-												<div
-													class="bg-[#0a0f1d] p-2 rounded border border-[#1e293b] text-xs"
-												>
+										<p class="text-[10px] font-semibold text-slate-400 uppercase">
+											Skills ein/aus (ganze Kategorien):
+										</p>
+										{#if filterSkillGroups.length === 0}
+											<p class="text-xs text-slate-500">
+												Keine Kategorie ist umschaltbar. Das legst du im Lebenslauf unter
+												„Statische Daten“ fest.
+											</p>
+										{:else}
+											{#each filterSkillGroups as { section, group } (group.id ?? group.category)}
+												<div class="bg-[#0a0f1d] p-2 rounded border border-[#1e293b] text-xs">
 													<label class="flex items-center justify-between cursor-pointer">
 														<span class="text-slate-300"
 															>{group.category || "Ohne Kategorie"}
-															<span class="text-slate-600">· {sec.title}</span></span
+															<span class="text-slate-600">· {section.title}</span></span
 														>
 														<input
 															type="checkbox"
@@ -2222,23 +2216,13 @@
 													{#if skillVisible(group.id)}
 														<div class="mt-1.5 ml-3 space-y-1 border-l border-[#1e293b] pl-2">
 															{#each skillLines(group.values) as value, vi (vi)}
-																<label
-																	class="flex items-center justify-between cursor-pointer"
-																>
-																	<span class="text-slate-400">{value}</span>
-																	<input
-																		type="checkbox"
-																		checked={skillValueVisible(group.id, value)}
-																		onchange={() => toggleSkillValue(group.id, value)}
-																		class="w-3 h-3 rounded accent-emerald-600 cursor-pointer"
-																	/>
-																</label>
+																<span class="block text-slate-400">{value}</span>
 															{/each}
 														</div>
 													{/if}
 												</div>
 											{/each}
-										{/each}
+										{/if}
 									</div>
 								</div>
 							</div>
@@ -2417,6 +2401,16 @@
 											rows="3"
 											class="{inputCls} font-mono"
 										></textarea>
+										<!-- Which categories may be switched off is decided here, once for the
+										     CV, instead of again for every application. -->
+										<label class="flex items-center gap-2 cursor-pointer">
+											<input
+												type="checkbox"
+												bind:checked={group.toggleable}
+												class="w-3.5 h-3.5 rounded accent-emerald-600 cursor-pointer"
+											/>
+											<span class="text-xs text-slate-300">Pro Bewerbung umschaltbar</span>
+										</label>
 									</div>
 								{/each}
 

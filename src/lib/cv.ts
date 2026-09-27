@@ -25,15 +25,24 @@ export interface CvEntry {
 }
 
 export interface CvSkillGroup {
-	/** Stable id for per-job filtering. Assigned via ensureCvIds(). */
+	/** Stable id for per-job filtering. Assigned via normalizeCv(). */
 	id?: string;
 	category: string;
 	/** One value per line; `*value*` renders bold. */
 	values: string;
+	/**
+	 * Whether this category may be switched off per application.
+	 *
+	 * Only marked categories appear in a job's CV filter — everything else is
+	 * always printed. Which skills are worth tailoring depends on the field, so
+	 * the decision belongs to the CV itself instead of being repeated for every
+	 * application.
+	 */
+	toggleable: boolean;
 }
 
 export interface CvSection {
-	/** Stable id for keyed rendering. Assigned via ensureCvIds(). */
+	/** Stable id for keyed rendering. Assigned via normalizeCv(). */
 	id?: string;
 	title: string;
 	entries: CvEntry[];
@@ -47,21 +56,48 @@ export interface CvData {
 	sections: CvSection[];
 }
 
-/** Assigns missing section / skill-group ids (keeps existing ones stable). */
-export function ensureCvIds(cv: CvData): CvData {
+/**
+ * Assigns missing section / skill-group ids (keeping existing ones stable) and
+ * turns the skill flag into a real boolean.
+ *
+ * The flag normalisation is what makes older data behave: a CV stored before
+ * the flag existed has `undefined` there, and that has to mean "not switchable"
+ * rather than "unknown".
+ */
+export function normalizeCv(cv: CvData): CvData {
 	for (const s of cv.sections) {
 		if (!s.id) s.id = nid();
 		for (const g of s.skills) {
 			if (!g.id) g.id = nid();
+			g.toggleable = g.toggleable === true;
 		}
 	}
 	return cv;
+}
+
+/** Only a marked category may be switched off per application. */
+export function isToggleable(group: CvSkillGroup): boolean {
+	return group.toggleable === true;
+}
+
+/**
+ * Every switchable category together with its section — exactly what a job's CV
+ * filter offers. Flat, because the filter lists categories, not sections.
+ */
+export function toggleableGroups(cv: CvData): { section: CvSection; group: CvSkillGroup }[] {
+	return cv.sections.flatMap((section) =>
+		section.skills.filter(isToggleable).map((group) => ({ section, group })),
+	);
 }
 
 /**
  * Placeholder CV content — fully generic template data in the Max-Mustermann
  * style. No real employers, institutions, dates, topics, skills or interests.
  * Real data belongs in the user's own workspace (IndexedDB / JSON import).
+ *
+ * The `toggleable` flags show the intent of the feature: the technical skills
+ * are the ones worth tailoring per application, languages and interests are
+ * fixed. Everything here is placeholder data — a real CV sets its own flags.
  */
 export const DEFAULT_CV: CvData = {
 	fuehrerschein: "",
@@ -91,30 +127,38 @@ export const DEFAULT_CV: CvData = {
 			title: "Sprachen",
 			entries: [],
 			skills: [
-				{ category: "Sprache 1", values: "Muttersprache" },
-				{ category: "Sprache 2", values: "C1 (schriftlich), B2 (mündlich)" },
-				{ category: "Sprache 3", values: "B1" },
+				{ category: "Sprache 1", values: "Muttersprache", toggleable: false },
+				{ category: "Sprache 2", values: "C1 (schriftlich), B2 (mündlich)", toggleable: false },
+				{ category: "Sprache 3", values: "B1", toggleable: false },
 			],
 		},
 		{
 			title: "Programmierkenntnisse",
 			entries: [],
 			skills: [
-				{ category: "Erweiterte Kenntnisse", values: "*Programmiersprache 1*\n*Programmiersprache 2*" },
-				{ category: "Grundkenntnisse", values: "Programmiersprache 3\nProgrammiersprache 4" },
+				{
+					category: "Erweiterte Kenntnisse",
+					values: "*Programmiersprache 1*\n*Programmiersprache 2*",
+					toggleable: true,
+				},
+				{
+					category: "Grundkenntnisse",
+					values: "Programmiersprache 3\nProgrammiersprache 4",
+					toggleable: true,
+				},
 			],
 		},
 		{
 			title: "Software und Tools",
 			entries: [],
-			skills: [{ category: "Kategorie 1", values: "Tool 1\nTool 2\nTool 3" }],
+			skills: [{ category: "Kategorie 1", values: "Tool 1\nTool 2\nTool 3", toggleable: true }],
 		},
 		{
 			title: "Interessen",
 			entries: [],
 			skills: [
-				{ category: "Interesse 1", values: "Stichwort 1\nStichwort 2" },
-				{ category: "Interesse 2", values: "Stichwort 3" },
+				{ category: "Interesse 1", values: "Stichwort 1\nStichwort 2", toggleable: false },
+				{ category: "Interesse 2", values: "Stichwort 3", toggleable: false },
 			],
 		},
 		{
@@ -212,18 +256,12 @@ export function cvDetails(text: string): string {
 		.join("\n\n");
 }
 
-/** Stable key for one skill value inside a group (per-job filtering). */
-export function skillValueKey(groupId: string | undefined, value: string): string {
-	return `${groupId ?? ""}::${value.trim()}`;
-}
-
 /**
  * One entry per non-empty line, duplicates collapsed.
  *
- * Duplicates have to go: a value listed twice would otherwise break the keyed
- * `{#each}` that renders the per-job skill toggles (`each_key_duplicate`) and
- * could never be switched off as a whole. Shared by the UI and the PDF/JSON
- * rendering so both always agree on what "one value" means.
+ * Duplicates have to go: the same value listed twice would render twice in the
+ * CV. Shared by the UI and the PDF rendering, so both always agree on what
+ * "one value" means.
  */
 export function skillLines(values: string): string[] {
 	const seen = new Set<string>();
@@ -235,15 +273,6 @@ export function skillLines(values: string): string[] {
 		out.push(value);
 	}
 	return out;
-}
-
-/** Visible raw values of a skill group after per-job filtering. */
-function visibleSkillValues(
-	text: string,
-	groupId: string | undefined,
-	hiddenValues: string[],
-): string[] {
-	return skillLines(text).filter((v) => !hiddenValues.includes(skillValueKey(groupId, v)));
 }
 
 /** Splits values into a Typst array (trailing comma: `("x",)` is an array, `("x")` is a string). */
@@ -275,8 +304,10 @@ function renderEntry(e: CvEntry): string {
 
 function renderSection(s: CvSection, job: JobData): string | null {
 	const skills = s.skills
-		.filter((g) => !(g.id && job.hiddenSkillIds.includes(g.id)))
-		.map((g) => ({ group: g, values: visibleSkillValues(g.values, g.id, job.hiddenSkillValues) }))
+		// A category can only be switched off when it is marked as switchable, so
+		// a stale entry in the filter can never hide a fixed category.
+		.filter((g) => !(isToggleable(g) && g.id && job.hiddenSkillIds.includes(g.id)))
+		.map((g) => ({ group: g, values: skillLines(g.values) }))
 		.filter(({ values }) => values.length > 0);
 	if (s.entries.length === 0 && skills.length === 0) return null;
 	const parts: string[] = s.entries.map((e) => renderEntry(e));
