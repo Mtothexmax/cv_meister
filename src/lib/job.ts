@@ -8,6 +8,13 @@ import { DEFAULT_LETTER, type LetterData } from "./letter.js";
 
 export type JobStatus = "Entwurf" | "In Bearbeitung" | "Verschickt";
 
+/**
+ * The selectable statuses, in workflow order — one source for the dropdown, the
+ * JSON export and the JSON import (which falls back to "Entwurf" for anything
+ * unrecognised).
+ */
+export const JOB_STATUSES: readonly JobStatus[] = ["Entwurf", "In Bearbeitung", "Verschickt"];
+
 /** Salutation gender for the contact person (♀️ / ♂️ / ⚧️). */
 export type Anrede = "frau" | "herr" | "divers";
 

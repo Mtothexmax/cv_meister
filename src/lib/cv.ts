@@ -9,7 +9,7 @@
  * - Skill values are one per line; `*value*` renders bold.
  */
 
-import { typstString, typstContent, todayISO, safeAccentColor } from "./letter.js";
+import { typstString, typstContent, todayISO, safeAccentColor, typstDate } from "./letter.js";
 import type { SharedData } from "./shared.js";
 import { nid } from "./shared.js";
 import type { JobData } from "./job.js";
@@ -294,13 +294,6 @@ function renderSection(s: CvSection, job: JobData): string | null {
 	return chunks.join("\n");
 }
 
-/** A Typst `datetime` for the template (only used in the hidden footer). */
-function cvDate(iso: string): string {
-	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso.trim());
-	if (!m) return "datetime(year: 2000, month: 1, day: 1)";
-	return `datetime(year: ${Number(m[1])}, month: ${Number(m[2])}, day: ${Number(m[3])})`;
-}
-
 /**
  * Assembles the full Typst source for the CV. The photo path comes via opts
  * (never written back into reactive state, so rendering stays side-effect free).
@@ -334,7 +327,7 @@ export function buildCvSource(
     positions: (),
   ),
   profile-picture: ${profile},
-  date: ${cvDate(todayISO())},
+  date: ${typstDate(todayISO())},
   language: "de",
   colored-headers: true,
   show-footer: false,

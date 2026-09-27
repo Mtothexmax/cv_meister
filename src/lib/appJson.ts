@@ -22,7 +22,7 @@
  * unknown keys are dropped, and anything missing keeps its current value.
  */
 
-import type { Anrede, JobData, JobStatus } from "./job.js";
+import { JOB_STATUSES, type Anrede, type JobData, type JobStatus } from "./job.js";
 import type { LetterData, WorkSample } from "./letter.js";
 import type { SharedData } from "./shared.js";
 import type { CvData, CvEntry, CvSection } from "./cv.js";
@@ -288,7 +288,6 @@ function readFileRef(node: unknown): ResolvedFileRef {
 	return { vorhanden: false, name: null, url: null, base64: null };
 }
 
-const JOB_STATUS: readonly JobStatus[] = ["Entwurf", "In Bearbeitung", "Verschickt"];
 const ANREDE: readonly Anrede[] = ["frau", "herr", "divers"];
 
 // ---------------------------------------------------------------------------
@@ -502,6 +501,18 @@ export const AUSWAHL_HINWEIS =
 	"Was in DIESEM Lebenslauf ausgeblendet ist. Alles, was hier NICHT steht, ist eingeschaltet. Die Zuordnung passiert beim Import über die Texte (Abschnitt/Kategorie/Wert bzw. Probentitel), nicht über IDs — Umbenennen setzt die Auswahl für den Eintrag zurück.";
 
 /**
+ * Hint for the mail text. Shared between the JSON and the UI so the two cannot
+ * drift apart.
+ *
+ * An AI filled this field with a complete letter, salutation and sign-off
+ * included, and the mail then carried them twice. "Anrede und Gruß kommen
+ * automatisch dazu" was too easy to read past, so the wording now says outright
+ * what NOT to write — and where the two parts come from.
+ */
+export const EMAIL_TEXT_INFO =
+	'Nur der MITTLERE Teil der Mail. Anrede ("Sehr geehrte …") und Grußformel ("Mit freundlichen Grüßen" + Name) werden automatisch ergänzt — hier NICHT eintragen, sonst stehen sie doppelt. Die Anrede ergibt sich aus Ansprechpartner/Anrede, die Grußformel aus dem Anschreiben.';
+
+/**
  * One application.
  *
  * `withImages` adds the logo bytes; only the workspace export sets it. The
@@ -532,11 +543,7 @@ function applicationNode(input: ApplicationInput, withImages = false) {
 				job.email,
 				"Empfänger der Bewerbungs-Mail. Ohne E-Mail-Adresse gibt es keine Mail-Vorschau und keinen Versand.",
 			),
-			emailText: field(
-				"E-Mail-Text",
-				job.emailText,
-				"Anrede und Gruß kommen automatisch dazu",
-			),
+			emailText: field("E-Mail-Text", job.emailText, EMAIL_TEXT_INFO),
 			ansprechpartner: field(
 				"Ansprechpartner (Anrede im Anschreiben)",
 				job.ansprechpartner,
@@ -843,7 +850,7 @@ export function readApplicationNode(node: unknown, fallbackJobId: string): Parse
 		accentColor: readString(felder.akzentfarbe, "#4d3e1d"),
 		adText: readString(felder.stellenausschreibung),
 		motivation: readString(felder.motivation),
-		status: readOneOf(felder.status, JOB_STATUS, "Entwurf"),
+		status: readOneOf(felder.status, JOB_STATUSES, "Entwurf"),
 		letter: {
 			body: readString(anschreiben.text),
 			closing: readString(anschreiben.grussformel, "Mit freundlichen Grüßen"),

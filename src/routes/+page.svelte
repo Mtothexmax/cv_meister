@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from "svelte";
+	import { onMount, tick } from "svelte";
 	import { compileLetter, compileLetterPdf, compileCv, compileCvPdf } from "$lib/letterCompiler";
 	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, contactGreeting, safeAccentColor, type LetterData, type WorkSample } from "$lib/letter";
 	import { DEFAULT_CV, ensureCvIds, skillLines, skillValueKey, type CvData } from "$lib/cv";
@@ -19,6 +19,7 @@
 	} from "$lib/binary";
 	import {
 		JSON_VERSION,
+		EMAIL_TEXT_INFO,
 		applyFilters,
 		buildApplicationJson,
 		buildCvJson,
@@ -34,8 +35,15 @@
 		type ApplicationInput,
 		type WorkspaceDoc,
 	} from "$lib/appJson";
-	import { DEFAULT_JOBS, createJob, type JobData, type JobStatus } from "$lib/job";
+	import {
+		DEFAULT_JOBS,
+		JOB_STATUSES,
+		createJob,
+		type JobData,
+		type JobStatus,
+	} from "$lib/job";
 	import { extractAccentColor } from "$lib/colors";
+	import { blackenWhiteLogo } from "$lib/images";
 	import { buildMotivationPrompt, buildCoverPrompt, buildMailPrompt } from "$lib/prompt";
 	import { requestGoogleToken, sendGmail, type MailAttachment } from "$lib/gmail";
 	import { loadState, saveState, type PersistedState } from "$lib/storage";
@@ -93,12 +101,12 @@
 	let jobFiles = $state<Record<string, JobFiles>>({});
 
 	function filesFor(id: string): JobFiles {
-		let f = jobFiles[id];
-		if (!f) {
-			f = { logo: null, logoUrl: null };
-			jobFiles[id] = f;
-		}
-		return f;
+		if (!jobFiles[id]) jobFiles[id] = { logo: null, logoUrl: null };
+		// Read back through the `$state` proxy. The object just assigned is raw, and
+		// mutating that one would not notify the template — the file name next to
+		// "Datei wählen" stayed "Keine Datei gewählt" after the first upload of a
+		// freshly loaded application, until a second upload went through the proxy.
+		return jobFiles[id];
 	}
 
 	let pages = $state<string[]>([]);
@@ -114,20 +122,14 @@
 	let stagedBackup = $state<{ name: string; data: WorkspaceDoc } | null>(null);
 	/** Two-step confirm for "reset workspace to placeholder defaults". */
 	let confirmReset = $state(false);
-	/**
-	 * An application JSON read from the clipboard, waiting for the "replace the
-	 * open application" confirmation. Nothing is touched until the user
-	 * confirms — importing rewrites the application's fields and its switch
-	 * state.
-	 */
-	let stagedAppImport = $state<{ quelle: string; doc: ApplicationDoc } | null>(null);
-	let appImportError = $state("");
 	let appJsonCopied = $state(false);
 	let appJsonTimer: ReturnType<typeof setTimeout> | undefined;
 	/** URL prompt for "URL wählen" next to the logo picker. */
 	let logoUrlOpen = $state(false);
 	let logoUrlInput = $state("");
 	let logoUrlBusy = $state(false);
+	/** The dialog's text field, so opening it can put the cursor there. */
+	let logoUrlInputEl = $state<HTMLInputElement | null>(null);
 	type PreviewDoc = "letter" | "cv" | "mail";
 	let previewDoc = $state<PreviewDoc>("letter");
 	let mailAvailable = $derived(activeJob.emailText.trim().length > 0);
@@ -645,25 +647,25 @@
 	 * "JSON kopieren". No file picker: copy, paste into a prompt, paste the
 	 * answer back, import.
 	 *
-	 * Nothing is applied yet: the document is only staged, and the confirm
-	 * dialog does the replacing.
+	 * The open application is replaced straight away, with no confirmation step
+	 * (User-Vorgabe): the clipboard is the "staging area", so a second question
+	 * only stood in the way. Errors are still reported and change nothing.
 	 */
 	async function importApplicationJson(): Promise<void> {
-		appImportError = "";
 		error = "";
 		try {
 			const doc = await parseClipboardJson("Bewerbung");
 			if (doc.art !== "bewerbung") {
 				throw new Error(`Erwartet wird eine einzelne Bewerbung, gefunden: "${doc.art}".`);
 			}
-			stagedAppImport = { quelle: "Zwischenablage", doc };
+			applyApplicationDoc(doc);
 		} catch (e) {
 			error = e instanceof Error ? e.message : "Zwischenablage konnte nicht gelesen werden.";
 		}
 	}
 
 	/**
-	 * Replaces the open application with the staged file.
+	 * Replaces the open application with `doc`.
 	 *
 	 * Only what belongs to *this* application is touched: its fields, the
 	 * Anschreiben and its switch state. The CV, the work-sample pool and the
@@ -673,17 +675,13 @@
 	 * The switch state travels as text (section/category/value, sample titles),
 	 * so it is resolved against the live CV and sample pool by `applyFilters`.
 	 */
-	function applyApplicationImport(): void {
-		const staged = stagedAppImport;
-		if (!staged) return;
+	function applyApplicationDoc(doc: ApplicationDoc): void {
 		const job = activeJob;
-		const parsed = readApplicationJson(staged.doc, job.id, shared);
+		const parsed = readApplicationJson(doc, job.id, shared);
 		if (!parsed) {
-			appImportError = "Die Datei enthält keine Bewerbung.";
+			error = "Das JSON enthält keine Bewerbung.";
 			return;
 		}
-		appImportError = "";
-		stagedAppImport = null;
 
 		if (parsed.shared) shared = parsed.shared;
 
@@ -722,18 +720,31 @@
 						"Bilddatei verwenden (PNG, JPG, GIF, WebP, SVG).",
 				);
 			}
-			const file = new File([bytes], imageFilenameFromUrl(url, kind.ext), {
+			const loaded = new File([bytes], imageFilenameFromUrl(url, kind.ext), {
 				type: kind.mime,
 			});
+			// Same treatment as the file picker: a logo that is white throughout
+			// would be invisible on white paper.
+			const blackened = await blackenWhiteLogo(loaded);
+			const file = blackened ?? loaded;
 			target.logo = file;
 			target.logoUrl = url;
-			const color = await extractAccentColor(file);
-			if (!quiet) {
-				logoNote = color
-					? `Logo von der URL geladen, Farbe ${color} übernommen.`
-					: "Logo von der URL geladen — keine Farbe gefunden.";
+			if (blackened) {
+				// Black by construction — the histogram would only add quantisation noise.
+				job.accentColor = "#000000";
+				if (!quiet) {
+					logoNote =
+						"Logo von der URL geladen, war rein weiß — schwarz gefärbt, Akzentfarbe Schwarz übernommen.";
+				}
+			} else {
+				const color = await extractAccentColor(file);
+				if (color) job.accentColor = color;
+				if (!quiet) {
+					logoNote = color
+						? `Logo von der URL geladen, Farbe ${color} übernommen.`
+						: "Logo von der URL geladen — keine Farbe gefunden.";
+				}
 			}
-			if (color) job.accentColor = color;
 		} catch (e) {
 			// A failure is always reported, even on a quiet (JSON-import) load —
 			// otherwise the note stays on "wird geladen …" forever.
@@ -743,9 +754,15 @@
 		scheduleSave();
 	}
 
-	function openLogoUrl() {
+	async function openLogoUrl() {
 		logoUrlInput = filesFor(activeJob.id).logoUrl ?? "";
 		logoUrlOpen = true;
+		// The dialog is created in the same flush, so wait for it and put the
+		// cursor straight into the field — no extra click needed. The existing
+		// URL is selected, so typing replaces it.
+		await tick();
+		logoUrlInputEl?.focus();
+		logoUrlInputEl?.select();
 	}
 
 	async function applyLogoUrl(): Promise<void> {
@@ -1345,10 +1362,6 @@
 		else scheduleRender();
 	}
 
-	function markSent() {
-		activeJob.status = "Verschickt";
-	}
-
 	async function onLogoSelect(files: FileList | null) {
 		const picked = files?.[0] ?? null;
 		const f = filesFor(activeJob.id);
@@ -1372,14 +1385,21 @@
 		// SVGs are used natively (vector-sharp); rasterization happens only
 		// internally for color extraction.
 		f.logo = picked;
-		logoNote = "";
-		// Auto-adopt the dominant logo color (white-filtered), manual picker overrides.
-		const color = await extractAccentColor(f.logo);
-		if (color) {
-			activeJob.accentColor = color;
-			logoNote = `Farbe ${color} übernommen.`;
+		// A logo that is white throughout would be invisible on white paper, so it
+		// is turned black before anything else looks at it. `null` means the image
+		// has other colors and stays exactly as uploaded.
+		const blackened = await blackenWhiteLogo(picked);
+		if (blackened) {
+			f.logo = blackened;
+			// The ink is black by construction, so the histogram would only add its
+			// 4-bit quantisation noise (`#080808` instead of `#000000`).
+			activeJob.accentColor = "#000000";
+			logoNote = "Logo war rein weiß — automatisch schwarz gefärbt, Akzentfarbe Schwarz übernommen.";
 		} else {
-			logoNote = "Keine Farbe gefunden — bitte manuell wählen.";
+			// Auto-adopt the dominant logo color (white-filtered), manual picker overrides.
+			const color = await extractAccentColor(f.logo);
+			if (color) activeJob.accentColor = color;
+			logoNote = color ? `Farbe ${color} übernommen.` : "Keine Farbe gefunden — bitte manuell wählen.";
 		}
 		render();
 	}
@@ -1644,12 +1664,12 @@
 		</div>
 	{/snippet}
 	<!-- Sidebar -->
-	<aside class="w-60 bg-[#0e1422] border-r border-[#1e293b] flex flex-col justify-between shrink-0 select-none">
-		<div>
+	<aside class="w-60 bg-[#0e1422] border-r border-[#1e293b] flex flex-col shrink-0 select-none overflow-hidden">
+		<div class="flex flex-col flex-1 min-h-0">
 			<a
 				href="#start"
 				title="Zurück zur Startseite"
-				class="h-14 px-5 border-b border-[#1e293b] flex items-center space-x-2 hover:bg-slate-800/40 transition group"
+				class="h-14 px-5 border-b border-[#1e293b] flex items-center space-x-2 hover:bg-slate-800/40 transition group shrink-0"
 			>
 				<div class="w-6 h-6 rounded bg-blue-600 flex items-center justify-center text-white text-xs font-bold">
 					CV
@@ -1661,10 +1681,20 @@
 				>
 			</a>
 
-			<div class="p-3 space-y-1">
+			<div class="p-3 flex flex-col flex-1 min-h-0 space-y-1">
+				<!-- Statische Daten steht ganz oben. -->
+				<button
+					onclick={() => switchView("static")}
+					class="w-full flex items-center px-3 py-2 rounded-md text-xs font-medium transition shrink-0 {view === 'static'
+						? 'bg-blue-600/10 text-blue-400 border border-blue-500/20'
+						: 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border border-transparent'}"
+				>
+					<span>Statische Daten</span>
+				</button>
+
 				<button
 					onclick={() => switchView("dashboard")}
-					class="w-full flex items-center justify-between px-3 py-2 rounded-md text-xs font-medium transition {view === 'dashboard' || view === 'detail'
+					class="w-full flex items-center justify-between px-3 py-2 rounded-md text-xs font-medium transition shrink-0 {view === 'dashboard' || view === 'detail'
 						? 'bg-blue-600/10 text-blue-400 border border-blue-500/20'
 						: 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border border-transparent'}"
 				>
@@ -1674,7 +1704,18 @@
 					>
 				</button>
 
-				<div class="pl-4 space-y-0.5">
+				<!-- Steht über der Liste und scrollt nicht mit. -->
+				<div class="pl-4 shrink-0">
+					<button
+						onclick={addJob}
+						class="w-full text-left px-3 py-1.5 rounded-md text-xs text-slate-600 hover:text-slate-300 hover:bg-slate-800/50 transition"
+					>
+						+ Neu
+					</button>
+				</div>
+
+				<!-- Wird die Liste zu lang, scrollt nur sie. -->
+				<div id="job-list" class="pl-4 space-y-0.5 flex-1 overflow-y-auto min-h-0 scroll-dark">
 					{#each jobs as j (j.id)}
 						<button
 							onclick={() => selectJob(j.id)}
@@ -1696,22 +1737,7 @@
 							>
 						</button>
 					{/each}
-					<button
-						onclick={addJob}
-						class="w-full text-left px-3 py-1.5 rounded-md text-xs text-slate-600 hover:text-slate-300 hover:bg-slate-800/50 transition"
-					>
-						+ Neu
-					</button>
 				</div>
-
-				<button
-					onclick={() => switchView("static")}
-					class="w-full flex items-center px-3 py-2 rounded-md text-xs font-medium transition {view === 'static'
-						? 'bg-blue-600/10 text-blue-400 border border-blue-500/20'
-						: 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border border-transparent'}"
-				>
-					<span>Statische Daten</span>
-				</button>
 			</div>
 		</div>
 
@@ -1721,7 +1747,7 @@
 				backupOpen = true;
 			}}
 			title="Arbeitsbereich als JSON exportieren / importieren"
-			class="w-full p-3 border-t border-[#1e293b] flex items-center space-x-2.5 text-left hover:bg-slate-800/50 transition"
+			class="w-full p-3 border-t border-[#1e293b] flex items-center space-x-2.5 text-left hover:bg-slate-800/50 transition shrink-0"
 		>
 			<span
 				class="w-7 h-7 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-[10px] font-bold text-slate-300 shrink-0"
@@ -1897,25 +1923,27 @@
 								</button>
 								<button
 									onclick={() => void importApplicationJson()}
-									title="JSON aus der Zwischenablage einlesen — ersetzt diese Bewerbung (Felder, Anschreiben, Auswahl)"
+									title="JSON aus der Zwischenablage einlesen — ersetzt diese Bewerbung sofort, ohne Rückfrage (Felder, Anschreiben, Auswahl)"
 									class="text-xs font-medium px-3 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 transition"
 								>
 									JSON importieren
 								</button>
 								<span class="w-px h-5 bg-[#1e293b]"></span>
-								<span
-									class="px-2.5 py-0.5 rounded text-[10px] font-mono border {statusCls(
+								<!-- Status is picked by hand (User-Vorgabe): "Abschicken" set it
+								     automatically, which is wrong for anything that was sent
+								     outside the app or is still in progress. -->
+								<select
+									bind:value={activeJob.status}
+									title="Status dieser Bewerbung"
+									aria-label="Status"
+									class="px-2 py-1 rounded border text-[11px] font-mono focus:outline-none focus:border-blue-500 {statusCls(
 										activeJob.status,
-									)}">{activeJob.status}</span
+									)}"
 								>
-								{#if activeJob.status !== "Verschickt"}
-									<button
-										onclick={markSent}
-										class="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold px-3 py-1.5 rounded-md text-xs transition"
-									>
-										Abschicken
-									</button>
-								{/if}
+									{#each JOB_STATUSES as s (s)}
+										<option value={s} class="bg-[#0a0f1d] text-slate-200">{s}</option>
+									{/each}
+								</select>
 								{#if jobs.length > 1}
 									<button
 										onclick={() => removeJob(activeJob.id)}
@@ -1973,7 +2001,7 @@
 											<div class="col-span-2 flex flex-col gap-2">
 												<label class="flex flex-col gap-1">
 													<span class="flex items-center justify-between gap-2">
-														<span class={labelCls}>E-Mail-Text (Anrede und Gruß kommen automatisch dazu)</span>
+														<span class={labelCls}>E-Mail-Text (Anrede und Gruß werden automatisch ergänzt)</span>
 														<button
 															onclick={copyMailPrompt}
 															title="Prompt für LLM kopieren"
@@ -1990,49 +2018,58 @@
 														placeholder="anbei sende ich Ihnen meine Bewerbungsunterlagen …"
 														class="{inputCls} leading-relaxed resize-y"
 													></textarea>
+													<!-- Same wording as the JSON `info` for this field, so a human
+													     and an AI read the identical rule. -->
+													<span class="text-[10px] text-slate-500 leading-relaxed"
+														>{EMAIL_TEXT_INFO}</span
+													>
 												</label>
 											</div>
 										{/if}
 										<div class="col-span-2">
 											<span class={labelCls}>Ansprechpartner (Anrede im Anschreiben)</span>
-											<div class="flex gap-2">
-												<input
-													bind:value={activeJob.ansprechpartner}
-													class="{inputCls} flex-1"
-													placeholder="Frau Muster"
-												/>
-												<div class="inline-flex gap-1 rounded-md border border-[#1e293b] bg-[#0a0f1d] p-0.5 shrink-0">
-													<button
-														onclick={() => (activeJob.anrede = "frau")}
-														title="weiblich"
-														aria-label="Anrede weiblich"
-														class="px-3 py-1 rounded text-base leading-none transition-colors {activeJob.anrede === 'frau'
-															? 'bg-blue-600 text-white'
-															: 'text-slate-400 hover:text-slate-200'}"
-													>
-														♀️
-													</button>
-													<button
-														onclick={() => (activeJob.anrede = "herr")}
-														title="männlich"
-														aria-label="Anrede männlich"
-														class="px-3 py-1 rounded text-base leading-none transition-colors {activeJob.anrede === 'herr'
-															? 'bg-blue-600 text-white'
-															: 'text-slate-400 hover:text-slate-200'}"
-													>
-														♂️
-													</button>
-													<button
-														onclick={() => (activeJob.anrede = "divers")}
-														title="divers"
-														aria-label="Anrede divers"
-														class="px-3 py-1 rounded text-base leading-none transition-colors {activeJob.anrede === 'divers'
-															? 'bg-blue-600 text-white'
-															: 'text-slate-400 hover:text-slate-200'}"
-													>
-														⚧️
-													</button>
-												</div>
+											<input
+												bind:value={activeJob.ansprechpartner}
+												class={inputCls}
+												placeholder="Frau Muster"
+											/>
+											<!-- Emoji plus word: ♀ and ⚧ are both "circle with a cross" at this
+											     size, so which one was selected was easy to misread. The group
+											     gets its own line because three labelled buttons do not fit
+											     beside the input. -->
+											<div
+												class="mt-1.5 inline-flex gap-1 rounded-md border border-[#1e293b] bg-[#0a0f1d] p-0.5"
+											>
+												<button
+													onclick={() => (activeJob.anrede = "frau")}
+													title="weiblich"
+													aria-label="Anrede weiblich"
+													class="px-2.5 py-1 rounded text-xs leading-none transition-colors {activeJob.anrede === 'frau'
+														? 'bg-blue-600 text-white'
+														: 'text-slate-400 hover:text-slate-200'}"
+												>
+													♀️ Frau
+												</button>
+												<button
+													onclick={() => (activeJob.anrede = "herr")}
+													title="männlich"
+													aria-label="Anrede männlich"
+													class="px-2.5 py-1 rounded text-xs leading-none transition-colors {activeJob.anrede === 'herr'
+														? 'bg-blue-600 text-white'
+														: 'text-slate-400 hover:text-slate-200'}"
+												>
+													♂️ Herr
+												</button>
+												<button
+													onclick={() => (activeJob.anrede = "divers")}
+													title="divers"
+													aria-label="Anrede divers"
+													class="px-2.5 py-1 rounded text-xs leading-none transition-colors {activeJob.anrede === 'divers'
+														? 'bg-blue-600 text-white'
+														: 'text-slate-400 hover:text-slate-200'}"
+												>
+													⚧️ Divers
+												</button>
 											</div>
 										</div>
 										<label>
@@ -2050,8 +2087,8 @@
 												(f) => onLogoSelect(f),
 											)}
 											<div class="flex items-center gap-2 mt-1.5">
-												<button
-													onclick={openLogoUrl}
+										<button
+											onclick={() => void openLogoUrl()}
 													title="Logo von einer URL laden (das ist der Weg, den eine KI im JSON setzen kann)"
 													class="text-[11px] font-medium px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition shrink-0"
 												>
@@ -2805,44 +2842,6 @@
 		</div>
 	{/if}
 
-	{#if stagedAppImport}
-		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3">
-			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-md w-full p-4 space-y-3">
-				<h3 class="text-xs font-bold text-slate-100">Bewerbung aus JSON ersetzen?</h3>
-				<p class="text-[11px] text-slate-400 break-all">Quelle: {stagedAppImport.quelle}</p>
-				<p class="text-xs text-slate-300">
-					Der Export enthält nur, was zu dieser Bewerbung gehört. Ersetzt wird
-					<span class="font-semibold">die geöffnete Bewerbung</span>:
-				</p>
-				<ul class="text-[11px] text-slate-400 space-y-0.5 list-disc pl-4">
-					<li>Felder, Anschreiben und die Ein-/Aus-Auswahl dieser Bewerbung</li>
-					<li>Stammdaten (global)</li>
-				</ul>
-				<p class="text-[11px] text-slate-500">
-					Lebenslauf, Arbeitsproben und zusätzliche PDFs sind global bzw. lokal hochgeladen und
-					bleiben unangetastet. Das Logo wird aus der URL in der Datei geladen.
-				</p>
-				{#if appImportError}
-					<p class="text-[11px] text-red-400">{appImportError}</p>
-				{/if}
-				<div class="flex justify-end gap-2">
-					<button
-						onclick={() => (stagedAppImport = null)}
-						class="px-3 py-1.5 bg-slate-800 text-slate-300 rounded text-xs"
-					>
-						Abbrechen
-					</button>
-					<button
-						onclick={applyApplicationImport}
-						class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold transition"
-					>
-						Ersetzen
-					</button>
-				</div>
-			</div>
-		</div>
-	{/if}
-
 	{#if logoUrlOpen}
 		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3">
 			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-md w-full p-4 space-y-3">
@@ -2852,6 +2851,7 @@
 					Bewerbungs-JSON steht danach nur diese URL — keine Bilddaten.
 				</p>
 				<input
+					bind:this={logoUrlInputEl}
 					bind:value={logoUrlInput}
 					placeholder="https://…/logo.png"
 					class="{inputCls} font-mono"

@@ -187,3 +187,114 @@ export async function tintSignatureImage(file: File, hex: string): Promise<Blob>
 	if (!blob) throw new Error("PNG-Export fehlgeschlagen");
 	return blob;
 }
+
+/**
+ * True when every pixel with any opacity is (near) white — a logo that would be
+ * invisible on white paper.
+ *
+ * `tolerance` is the largest per-channel distance from 255 that still counts as
+ * white, so the anti-aliased edge of a white shape (white with partial alpha)
+ * passes as well. A fully transparent image is **not** white: there is nothing
+ * to show, and blackening it would produce nothing either.
+ */
+export function isWhiteOnly(px: Uint8ClampedArray, tolerance = 24): boolean {
+	let opaque = false;
+	for (let i = 0; i < px.length; i += 4) {
+		if (px[i + 3] === 0) continue;
+		opaque = true;
+		if (255 - px[i] > tolerance || 255 - px[i + 1] > tolerance || 255 - px[i + 2] > tolerance) {
+			return false;
+		}
+	}
+	return opaque;
+}
+
+/** Inverts the RGB channels, keeping alpha: white ink becomes black ink with the
+ *  same anti-aliasing. Only ever applied to an image that is white throughout. */
+export function invertKernel(px: Uint8ClampedArray): void {
+	for (let i = 0; i < px.length; i += 4) {
+		px[i] = 255 - px[i];
+		px[i + 1] = 255 - px[i + 1];
+		px[i + 2] = 255 - px[i + 2];
+	}
+}
+
+/** A white paint value in an SVG: `#fff`, `#ffffff`, the keyword, `rgb(255,255,255)`. */
+const SVG_WHITE = "(?:#fff(?:fff)?|white|rgb\\(\\s*255\\s*,\\s*255\\s*,\\s*255\\s*\\))";
+/** Attribute names that carry paint — deliberately *without* `stroke-width`,
+ *  `fill-opacity` and friends (the regex requires `=`/`:` right after the name). */
+const SVG_PAINT = "(?:fill|stroke|stop-color|flood-color|lighting-color|color)";
+
+/**
+ * Rewrites white paint in an SVG source to black, keeping the vectors sharp.
+ *
+ * Only real paint positions are touched: `fill="#fff"`, `style="fill: white"`,
+ * and `fill: #ffffff;` inside a `<style>` block. A bare `white` word is never
+ * replaced on its own — that would also hit `id="white-part"` or a `class="white"`
+ * rule and break the file. The flip side of being this careful: a white gradient
+ * stop reached through `fill="url(#g)"` survives the rewrite, so
+ * `blackenWhiteLogo()` verifies the result instead of trusting it.
+ */
+export function blackenSvgSource(svg: string): string {
+	const attr = new RegExp(`(${SVG_PAINT}\\s*=\\s*["'])${SVG_WHITE}(["'])`, "gi");
+	const decl = new RegExp(`(${SVG_PAINT}\\s*:\\s*)${SVG_WHITE}(\\s*[;}"'])`, "gi");
+	return svg.replace(attr, "$1#000000$2").replace(decl, "$1#000000$2");
+}
+
+/** Draws any image file (SVG included) into a canvas and returns its pixels. */
+async function pixelsOf(file: File, maxSide = 600): Promise<ImageData> {
+	// createImageBitmap rejects an SVG without intrinsic dimensions, so the
+	// rasterizer the rest of the app uses goes in front.
+	const bitmap = await createImageBitmap(file).catch(async () =>
+		createImageBitmap(await svgToPng(file, maxSide)),
+	);
+	const scale = Math.min(1, maxSide / Math.max(1, bitmap.width, bitmap.height));
+	const canvas = document.createElement("canvas");
+	canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+	canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+	const ctx = canvas.getContext("2d", { willReadFrequently: true });
+	if (!ctx) {
+		bitmap.close();
+		throw new Error("Canvas nicht verfügbar");
+	}
+	ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+	bitmap.close();
+	return ctx.getImageData(0, 0, canvas.width, canvas.height);
+}
+
+/**
+ * Turns an all-white logo black so it stays visible on white paper. Returns the
+ * recoloured file, or `null` when the image carries any other colour — an
+ * ordinary logo must not be touched.
+ *
+ * An SVG keeps its vectors: the white paint is rewritten in the source and the
+ * result is *verified* by rasterising it, because a gradient or an exotic colour
+ * form survives the rewrite and would still render white. Everything else — and
+ * that fallback — is rasterised and inverted.
+ */
+export async function blackenWhiteLogo(file: File): Promise<File | null> {
+	const original = await pixelsOf(file);
+	if (!isWhiteOnly(original.data)) return null;
+
+	if (file.type === "image/svg+xml" || /\.svg$/i.test(file.name)) {
+		const source = await file.text();
+		const blackened = blackenSvgSource(source);
+		if (blackened !== source) {
+			const candidate = new File([blackened], file.name, { type: "image/svg+xml" });
+			if (!isWhiteOnly((await pixelsOf(candidate)).data)) return candidate;
+		}
+	}
+
+	const canvas = document.createElement("canvas");
+	canvas.width = original.width;
+	canvas.height = original.height;
+	const ctx = canvas.getContext("2d");
+	if (!ctx) throw new Error("Canvas nicht verfügbar");
+	invertKernel(original.data);
+	ctx.putImageData(original, 0, 0);
+	const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, "image/png"));
+	if (!blob) throw new Error("PNG-Export fehlgeschlagen");
+	// The extension picks Typst's decoder (`logoExt`), so the new format needs the
+	// new name: a PNG body behind a `.svg` name would go to the SVG parser.
+	return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".png", { type: "image/png" });
+}

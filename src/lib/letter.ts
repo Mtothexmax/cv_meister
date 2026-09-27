@@ -82,17 +82,24 @@ export function letterBodyParagraphs(body: string, greetRaw: string | null): str
 }
 
 /**
- * Builds a Typst date expression like the reference letters use.
- * A raw `datetime(...)` would render literally as `datetime(year: ...)` text
- * in the PDF — it must be formatted with `.display(...)` (which, unlike
- * `datetime.today()`, needs no clock and works in WASM).
+ * Builds a Typst date expression in German order (`27.09.2026`).
+ *
+ * Two things are easy to get wrong here:
+ * - A raw `datetime(...)` renders literally as `datetime(year: ...)` text in
+ *   the PDF, so it must be formatted with `.display(...)` (which, unlike
+ *   `datetime.today()`, needs no clock and works in WASM).
+ * - The pattern order is the display order. `[month].[day].[year]` produces the
+ *   US `09.27.2026`; German is `[day].[month].[year]`. Typst does not localise
+ *   this from `set text(lang: "de")`.
+ *
+ * Shared by the Anschreiben and the Lebenslauf so both documents agree.
  */
-function typstDate(iso: string): string {
+export function typstDate(iso: string): string {
 	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso.trim());
 	const expr = m
 		? `datetime(year: ${Number(m[1])}, month: ${Number(m[2])}, day: ${Number(m[3])})`
 		: `datetime(year: 2000, month: 1, day: 1)`;
-	return `${expr}.display("[month].[day].[year]")`;
+	return `${expr}.display("[day].[month].[year]")`;
 }
 
 /**
@@ -112,15 +119,38 @@ export function cleanRole(rolle: string): string {
 }
 
 /**
+ * The surname out of a free-text contact: "Max Mustermann" → "Mustermann".
+ *
+ * Three normalisations, all on the input side only:
+ * - a leading Herr/Frau is dropped, because the salutation adds its own
+ *   ("Herr Herr Müller" would otherwise be possible),
+ * - of several words the LAST one wins — in a name written the usual way that is
+ *   the surname, and the salutation wants exactly that,
+ * - a trailing title/degree is dropped, so "Max Mustermann M.Sc." does not greet
+ *   "Frau M.Sc.". Parenthesised additions ("(M.Sc.)") go the same way.
+ */
+export function contactSurname(raw: string): string {
+	const words = raw
+		.trim()
+		.replace(/^(Herrn?|Frau)\s+/i, "")
+		.replace(/\([^)]*\)/g, " ")
+		.trim()
+		.split(/\s+/)
+		.filter(Boolean);
+	while (words.length > 1 && /\.$/.test(words[words.length - 1])) words.pop();
+	return words.length ? words[words.length - 1] : "";
+}
+
+/**
  * Personal salutation from contact + gender toggle ("Sehr geehrte Frau X," /
- * "Sehr geehrter Herr X," / neutral "Guten Tag X,"). Fallback when no contact:
- * "Sehr geehrte MitarbeiterInnen von [Firmenname]," — the firm name is used
- * verbatim, deliberately without quotation marks. Returns null only when neither
- * contact nor firm name are available.
- * A leading Herr/Frau in the input is stripped to avoid duplication.
+ * "Sehr geehrter Herr X," / neutral "Guten Tag X,"). Only the surname is used —
+ * see `contactSurname()`. Fallback when no contact: "Sehr geehrte
+ * MitarbeiterInnen von [Firmenname]," — the firm name is used verbatim,
+ * deliberately without quotation marks. Returns null only when neither contact
+ * nor firm name are available.
  */
 export function contactGreeting(job: JobData): string | null {
-	const contactName = job.ansprechpartner.trim().replace(/^(Herrn?|Frau)\s+/i, "").trim();
+	const contactName = contactSurname(job.ansprechpartner);
 	if (!contactName) {
 		const firma = job.firma.trim();
 		if (firma) return `Sehr geehrte MitarbeiterInnen von ${firma},`;

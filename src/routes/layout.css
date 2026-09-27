@@ -27,3 +27,29 @@
 	text-rendering: optimizeLegibility;
 	font-feature-settings: 'liga';
 }
+
+/* Slim dark scrollbar, opt-in via the class. The native scrollbar is a bright
+ * slab on the dark sidebar and eats ~15px of its 240px width; the rest of the
+ * app keeps the native look. */
+.scroll-dark {
+	scrollbar-width: thin;
+	scrollbar-color: #334155 transparent;
+}
+
+.scroll-dark::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+
+.scroll-dark::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.scroll-dark::-webkit-scrollbar-thumb {
+	background: #334155;
+	border-radius: 9999px;
+}
+
+.scroll-dark::-webkit-scrollbar-thumb:hover {
+	background: #475569;
+}
