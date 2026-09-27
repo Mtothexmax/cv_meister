@@ -2,7 +2,14 @@
 	import { onMount, tick } from "svelte";
 	import { compileLetter, compileLetterPdf, compileCv, compileCvPdf } from "$lib/letterCompiler";
 	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, contactGreeting, safeAccentColor, type LetterData, type WorkSample } from "$lib/letter";
-	import { DEFAULT_CV, normalizeCv, skillLines, toggleableGroups, type CvData } from "$lib/cv";
+	import {
+		DEFAULT_CV,
+		normalizeCv,
+		skillValueKey,
+		toggleableEntries,
+		type CvSkillGroup,
+		type CvData,
+	} from "$lib/cv";
 	import { DEFAULT_SHARED, einstiegText, nid, type SharedData } from "$lib/shared";
 	import {
 		DEFAULT_DOCUMENTS,
@@ -43,7 +50,9 @@
 		type JobStatus,
 	} from "$lib/job";
 	import { extractAccentColor } from "$lib/colors";
-	import { blackenWhiteLogo } from "$lib/images";
+	import { parseColorText } from "$lib/colorMath";
+	import ColorPicker from "$lib/ColorPicker.svelte";
+	import { SAMPLE_COMPRESSION_INFO, blackenWhiteLogo } from "$lib/images";
 	import { buildMotivationPrompt, buildCoverPrompt, buildMailPrompt } from "$lib/prompt";
 	import { requestGoogleToken, sendGmail, type MailAttachment } from "$lib/gmail";
 	import { loadState, saveState, type PersistedState } from "$lib/storage";
@@ -74,7 +83,8 @@
 	let jobs = $state<JobData[]>(structuredClone(DEFAULT_JOBS));
 	let cv = $state<CvData>(normalizeCv(structuredClone(DEFAULT_CV)));
 	/** Only categories marked as switchable appear in a job's CV filter. */
-	let filterSkillGroups = $derived(toggleableGroups(cv));
+	/** Only entries inside a marked category appear in a job's CV filter. */
+	let filterSkillEntries = $derived(toggleableEntries(cv));
 	let samples = $state<WorkSample[]>(structuredClone(DEFAULT_SAMPLES));
 	/** Extra PDFs attached to every application (Statische Daten → PDF). */
 	let documents = $state<ExtraDocument[]>(structuredClone(DEFAULT_DOCUMENTS));
@@ -174,6 +184,8 @@
 	let appJsonTimer: ReturnType<typeof setTimeout> | undefined;
 	/** URL prompt for "URL wählen" next to the logo picker. */
 	let logoUrlOpen = $state(false);
+	/** The accent-colour picker dialog (triggered from the swatch). */
+	let colorPickerOpen = $state(false);
 	let logoUrlInput = $state("");
 	let logoUrlBusy = $state(false);
 	/** The dialog's text field, so opening it can put the cursor there. */
@@ -462,7 +474,7 @@
 				jobs = s.jobs as JobData[];
 				for (const j of jobs) {
 					if (!j.letter) j.letter = structuredClone(DEFAULT_LETTER);
-					if (!Array.isArray(j.hiddenSkillIds)) j.hiddenSkillIds = [];
+					if (!Array.isArray(j.hiddenSkillValues)) j.hiddenSkillValues = [];
 					if (!Array.isArray(j.hiddenSampleIds)) j.hiddenSampleIds = [];
 					if (typeof j.emailText !== "string") j.emailText = "";
 					if (typeof j.motivation !== "string") j.motivation = "";
@@ -473,6 +485,9 @@
 						j.anrede = "frau";
 					if (typeof j.accentColor !== "string") j.accentColor = "#4d3e1d";
 					if (typeof j.fuehrerschein !== "boolean") j.fuehrerschein = false;
+					// Absent in state saved before the switch existed: "on" is the
+					// intended default, not an unknown.
+					if (typeof j.compressImages !== "boolean") j.compressImages = true;
 				}
 			}
 			if (s.cv && typeof s.cv === "object") cv = normalizeCv(s.cv as CvData);
@@ -828,10 +843,15 @@
 		return `${kind} ${tag}.pdf`;
 	}
 
+	/**
+	 * The .eml carries the company name only: it is filed per company, and the
+	 * applicant's name already sits in the attached PDFs. Characters a download
+	 * name cannot hold are replaced rather than dropped, so the name stays
+	 * readable.
+	 */
 	function emlFilename(job: JobData): string {
-		const tag =
-			`${shared.firstname} ${shared.lastname}`.trim() || job.firma.trim() || "dokument";
-		return `Bewerbung ${tag}.eml`;
+		const firma = job.firma.trim().replace(/[\\/:*?"<>|]+/g, "-");
+		return `${firma || "Bewerbung"}.eml`;
 	}
 
 	async function copyMailText() {
@@ -1451,6 +1471,22 @@
 		render();
 	}
 
+	/**
+	 * Takes a typed hex value for the accent colour. Only a parseable value is
+	 * applied — a half-typed "#4d3e" must not blank the colour — and on blur the
+	 * field is put back to whatever the application actually holds, so it never
+	 * keeps showing a value that was silently rejected.
+	 */
+	function applyAccentHex(el: HTMLInputElement, onBlur: boolean) {
+		const parsed = parseColorText(el.value);
+		if (parsed) {
+			activeJob.accentColor = parsed;
+			el.value = parsed;
+			return;
+		}
+		if (onBlur) el.value = safeAccentColor(activeJob.accentColor);
+	}
+
 	// --- Work samples (global pool, toggled per job) ---
 
 	function addSample() {
@@ -1561,16 +1597,16 @@
 		cv.sections[si].skills.splice(gi, 1);
 	}
 
-	function toggleSkill(id: string | undefined) {
-		if (!id) return;
-		const h = activeJob.hiddenSkillIds;
-		const i = h.indexOf(id);
+	function toggleSkillValue(key: string) {
+		const h = activeJob.hiddenSkillValues;
+		const i = h.indexOf(key);
 		if (i >= 0) h.splice(i, 1);
-		else h.push(id);
+		else h.push(key);
 	}
 
-	function skillVisible(id: string | undefined): boolean {
-		return !id || !activeJob.hiddenSkillIds.includes(id);
+	/** Whether this single CV entry is shown in the active application. */
+	function skillValueVisible(group: CvSkillGroup, value: string): boolean {
+		return !activeJob.hiddenSkillValues.includes(skillValueKey(group, value));
 	}
 
 	function initials(name: string): string {
@@ -2119,14 +2155,37 @@
 												</button>
 											</div>
 										</div>
-										<label>
+										<div>
 											<span class={labelCls}>Akzentfarbe (aus Logo)</span>
-											<input
-												type="color"
-												bind:value={activeJob.accentColor}
-												class="h-9 w-full rounded border border-[#1e293b] bg-[#0a0f1d]"
-											/>
-										</label>
+											<div class="flex items-center gap-2">
+												<button
+													type="button"
+													id="accent-swatch"
+													onclick={() => (colorPickerOpen = true)}
+													title="Farbwähler öffnen"
+													aria-label="Farbwähler öffnen"
+													class="w-9 h-9 shrink-0 rounded border border-[#1e293b] hover:ring-2 hover:ring-blue-500 transition"
+													style="background: {safeAccentColor(activeJob.accentColor)};"
+												></button>
+												<!-- Typing the value directly is the point: the native
+												     colour input this replaces has no field on several
+												     platforms. -->
+												<input
+													id="accent-hex"
+													type="text"
+													spellcheck="false"
+													autocomplete="off"
+													placeholder="#rrggbb"
+													value={activeJob.accentColor}
+													class="{inputCls} font-mono"
+													oninput={(e) => applyAccentHex(e.currentTarget, false)}
+													onchange={(e) => applyAccentHex(e.currentTarget, true)}
+													onkeydown={(e) => {
+														if (e.key === "Enter") applyAccentHex(e.currentTarget, true);
+													}}
+												/>
+											</div>
+										</div>
 										<div class="col-span-2">
 											<span class={labelCls}>Firmenlogo</span>
 											{@render fileButton(
@@ -2229,6 +2288,24 @@
 											/>
 										</label>
 									{/each}
+									<!-- Applies to what is rendered — preview and every PDF alike.
+									     The uploaded original is never modified. -->
+									<label
+										id="sample-compress"
+										class="bg-[#0a0f1d] p-2.5 rounded border border-[#1e293b] flex items-center justify-between cursor-pointer"
+									>
+										<span class="text-xs text-slate-200">Bilder komprimieren</span>
+										<input
+											type="checkbox"
+											bind:checked={activeJob.compressImages}
+											class="w-4 h-4 rounded accent-emerald-600 cursor-pointer"
+										/>
+									</label>
+									{#if activeJob.compressImages}
+										<p class="text-[10px] text-slate-500 leading-relaxed">
+											{SAMPLE_COMPRESSION_INFO}
+										</p>
+									{/if}
 								</div>
 							</div>
 
@@ -2247,37 +2324,42 @@
 										/>
 									</label>
 
-									<div class="space-y-2">
+									<div class="space-y-2" id="cv-filter">
 										<p class="text-[10px] font-semibold text-slate-400 uppercase">
-											Skills ein/aus (ganze Kategorien):
+											Einträge ein/aus:
 										</p>
-										{#if filterSkillGroups.length === 0}
+										{#if filterSkillEntries.length === 0}
 											<p class="text-xs text-slate-500">
 												Keine Kategorie ist umschaltbar. Das legst du im Lebenslauf unter
 												„Statische Daten“ fest.
 											</p>
 										{:else}
-											{#each filterSkillGroups as { section, group } (group.id ?? group.category)}
+											{#each filterSkillEntries as { section, group, values } (group.id ?? group.category)}
 												<div class="bg-[#0a0f1d] p-2 rounded border border-[#1e293b] text-xs">
-													<label class="flex items-center justify-between cursor-pointer">
-														<span class="text-slate-300"
-															>{group.category || "Ohne Kategorie"}
-															<span class="text-slate-600">· {section.title}</span></span
-														>
-														<input
-															type="checkbox"
-															checked={skillVisible(group.id)}
-															onchange={() => toggleSkill(group.id)}
-															class="w-3.5 h-3.5 rounded accent-emerald-600 cursor-pointer"
-														/>
-													</label>
-													{#if skillVisible(group.id)}
-														<div class="mt-1.5 ml-3 space-y-1 border-l border-[#1e293b] pl-2">
-															{#each skillLines(group.values) as value, vi (vi)}
-																<span class="block text-slate-400">{value}</span>
-															{/each}
-														</div>
-													{/if}
+													<p class="text-slate-300">
+														{group.category || "Ohne Kategorie"}
+														<span class="text-slate-600">· {section.title}</span>
+													</p>
+													<!-- Jeder Eintrag einzeln: ein Eintrag ist eine Zeile im
+													     Lebenslauf (z. B. eine Programmiersprache). Fällt eine
+													     Kategorie damit ganz weg, verschwindet auch ihre Zeile. -->
+													<div class="mt-1.5 ml-3 space-y-1 border-l border-[#1e293b] pl-2">
+														{#each values as value (value)}
+															<label class="flex items-center justify-between gap-2 cursor-pointer">
+																<span
+																	class={skillValueVisible(group, value)
+																		? "text-slate-400"
+																		: "text-slate-600 line-through"}>{value}</span
+																>
+																<input
+																	type="checkbox"
+																	checked={skillValueVisible(group, value)}
+																	onchange={() => toggleSkillValue(skillValueKey(group, value))}
+																	class="w-3.5 h-3.5 rounded accent-emerald-600 cursor-pointer shrink-0"
+																/>
+															</label>
+														{/each}
+													</div>
 												</div>
 											{/each}
 										{/if}
@@ -2459,15 +2541,15 @@
 											rows="3"
 											class="{inputCls} font-mono"
 										></textarea>
-										<!-- Which categories may be switched off is decided here, once for the
-										     CV, instead of again for every application. -->
+										<!-- Marks the category as switchable — but what gets switched is
+										     each of its entries on its own, per application. -->
 										<label class="flex items-center gap-2 cursor-pointer">
 											<input
 												type="checkbox"
 												bind:checked={group.toggleable}
 												class="w-3.5 h-3.5 rounded accent-emerald-600 cursor-pointer"
 											/>
-											<span class="text-xs text-slate-300">Pro Bewerbung umschaltbar</span>
+											<span class="text-xs text-slate-300">Einträge pro Bewerbung umschaltbar</span>
 										</label>
 									</div>
 								{/each}
@@ -2890,6 +2972,23 @@
 				{#each debugLines as line, i (i)}
 					<p class="whitespace-pre-wrap break-all">{line}</p>
 				{/each}
+			</div>
+		</div>
+	{/if}
+
+	{#if colorPickerOpen}
+		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3">
+			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg w-full max-w-xs p-4 space-y-3">
+				<div class="flex items-center justify-between">
+					<h3 class="text-xs font-bold text-slate-100">Akzentfarbe</h3>
+					<button
+						onclick={() => (colorPickerOpen = false)}
+						class="text-xs font-medium px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition"
+					>
+						Fertig
+					</button>
+				</div>
+				<ColorPicker bind:value={activeJob.accentColor} />
 			</div>
 		</div>
 	{/if}

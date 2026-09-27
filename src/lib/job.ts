@@ -47,8 +47,18 @@ export interface JobData {
 
 	/** Show the driver's license section in this job's CV. */
 	fuehrerschein: boolean;
-	/** CV skill-group ids excluded from this job's CV. */
-	hiddenSkillIds: string[];
+	/**
+	 * Route this job's work-sample images through `compressForPdf()` before they
+	 * are rendered — for the preview and for every PDF alike. The stored original
+	 * is never modified, only the copy that goes into the output.
+	 */
+	compressImages: boolean;
+	/**
+	 * Single CV skill entries excluded from this job's CV, keyed by
+	 * `skillValueKey()` (`<groupId>::<value>`). Only values inside a category
+	 * marked as switchable can appear here.
+	 */
+	hiddenSkillValues: string[];
 	/** Work-sample ids excluded from this job's letter. */
 	hiddenSampleIds: string[];
 
@@ -75,7 +85,11 @@ export function createJob(partial: Partial<JobData> = {}): JobData {
 		rolle: "",
 		accentColor: "#4d3e1d",
 		fuehrerschein: false,
-		hiddenSkillIds: [],
+		// On by default: a full-resolution phone photo is the one thing that
+		// reliably blows up an application PDF, and nobody looks at it at that
+		// size. Turn it off when a sample must keep every pixel.
+		compressImages: true,
+		hiddenSkillValues: [],
 		hiddenSampleIds: [],
 		letter: structuredClone(DEFAULT_LETTER),
 		...partial,

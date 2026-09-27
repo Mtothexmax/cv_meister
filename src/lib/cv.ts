@@ -31,12 +31,18 @@ export interface CvSkillGroup {
 	/** One value per line; `*value*` renders bold. */
 	values: string;
 	/**
-	 * Whether this category may be switched off per application.
+	 * Whether the *entries* of this category may be switched off per
+	 * application — not the category as a whole.
 	 *
-	 * Only marked categories appear in a job's CV filter — everything else is
-	 * always printed. Which skills are worth tailoring depends on the field, so
-	 * the decision belongs to the CV itself instead of being repeated for every
-	 * application.
+	 * The individual lines are what an application actually needs to tailor:
+	 * one job wants C# and Python, the next wants SQL. Only values in a marked
+	 * category appear in a job's CV filter; everything else is always printed.
+	 * Which entries are worth tailoring depends on the field, so the decision
+	 * belongs to the CV itself instead of being repeated for every application.
+	 *
+	 * Hiding every value of a category removes the category line too — see
+	 * `renderSection()`. That is how a whole category (e.g. one language, whose
+	 * single value is its proficiency) is dropped without a second switch.
 	 */
 	toggleable: boolean;
 }
@@ -75,18 +81,41 @@ export function normalizeCv(cv: CvData): CvData {
 	return cv;
 }
 
-/** Only a marked category may be switched off per application. */
+/** Only the entries of a marked category may be switched off per application. */
 export function isToggleable(group: CvSkillGroup): boolean {
 	return group.toggleable === true;
 }
 
 /**
- * Every switchable category together with its section — exactly what a job's CV
- * filter offers. Flat, because the filter lists categories, not sections.
+ * Key of one switchable entry: the group id plus the visible value text.
+ *
+ * The id keeps the key stable when the category is renamed, and `skillLines()`
+ * removes duplicates, so the value text is unique within its group. The text is
+ * part of the key on purpose — an entry that is reworded is a different entry.
  */
-export function toggleableGroups(cv: CvData): { section: CvSection; group: CvSkillGroup }[] {
+export function skillValueKey(group: CvSkillGroup, value: string): string {
+	return `${group.id ?? ""}::${value}`;
+}
+
+/** The values of `group` that this application shows. */
+export function visibleSkillValues(group: CvSkillGroup, job: JobData): string[] {
+	const all = skillLines(group.values);
+	if (!isToggleable(group)) return all;
+	return all.filter((v) => !job.hiddenSkillValues.includes(skillValueKey(group, v)));
+}
+
+/**
+ * Every switchable entry together with its section and category — exactly what a
+ * job's CV filter offers. Flat, because the filter lists entries, not sections.
+ */
+export function toggleableEntries(
+	cv: CvData,
+): { section: CvSection; group: CvSkillGroup; values: string[] }[] {
 	return cv.sections.flatMap((section) =>
-		section.skills.filter(isToggleable).map((group) => ({ section, group })),
+		section.skills
+			.filter(isToggleable)
+			.map((group) => ({ section, group, values: skillLines(group.values) }))
+			.filter(({ values }) => values.length > 0),
 	);
 }
 
@@ -304,10 +333,11 @@ function renderEntry(e: CvEntry): string {
 
 function renderSection(s: CvSection, job: JobData): string | null {
 	const skills = s.skills
-		// A category can only be switched off when it is marked as switchable, so
-		// a stale entry in the filter can never hide a fixed category.
-		.filter((g) => !(isToggleable(g) && g.id && job.hiddenSkillIds.includes(g.id)))
-		.map((g) => ({ group: g, values: skillLines(g.values) }))
+		// Entries can only be switched off inside a marked category, so a stale
+		// entry in the filter can never hide a fixed value.
+		.map((g) => ({ group: g, values: visibleSkillValues(g, job) }))
+		// A category with nothing left disappears entirely — label included. That
+		// is what makes "Deutsch" vanish when its only value is hidden.
 		.filter(({ values }) => values.length > 0);
 	if (s.entries.length === 0 && skills.length === 0) return null;
 	const parts: string[] = s.entries.map((e) => renderEntry(e));

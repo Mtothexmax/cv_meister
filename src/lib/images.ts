@@ -298,3 +298,90 @@ export async function blackenWhiteLogo(file: File): Promise<File | null> {
 	// new name: a PNG body behind a `.svg` name would go to the SVG parser.
 	return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".png", { type: "image/png" });
 }
+
+/**
+ * Longest side of a work-sample image *as it goes into the PDF*, in pixels.
+ *
+ * A sample sits in one column of a two-column grid, so it is displayed about
+ * 80 mm wide — roughly 970 px at 300 dpi. 1600 px leaves headroom (≈ 500 dpi)
+ * for a layout change without ever shipping a phone photo at full size.
+ */
+export const SAMPLE_MAX_SIDE = 1600;
+
+/** JPEG quality of the work-sample copy that goes into the PDF. */
+export const SAMPLE_JPEG_QUALITY = 0.9;
+
+/**
+ * What the switch does, as one text for both the JSON and the UI — so the two
+ * cannot drift apart (the same pattern as `EMAIL_TEXT_INFO`).
+ */
+export const SAMPLE_COMPRESSION_INFO =
+	`Proben gehen als verkleinerte JPEGs in Vorschau und PDF (längste Seite ${SAMPLE_MAX_SIDE} px, ` +
+	`Qualität ${Math.round(SAMPLE_JPEG_QUALITY * 100)}). Die hochgeladenen Originale bleiben unverändert.`;
+
+/**
+ * Downscaled JPEG copy of an image, **for the rendered output only**.
+ *
+ * The stored original is never touched: this returns a fresh `File` that lives
+ * for one render. Work samples are screenshots and photos straight off a phone,
+ * and at full resolution a single one of them can outweigh the rest of the
+ * application — they are never displayed at that size.
+ *
+ * JPEG has no alpha channel, so the canvas is filled white first; otherwise a
+ * transparent PNG would come out black. The image is never scaled *up*: a small
+ * sample keeps its pixels and only loses the PNG overhead.
+ */
+export async function compressForPdf(
+	file: File,
+	maxSide = SAMPLE_MAX_SIDE,
+	quality = SAMPLE_JPEG_QUALITY,
+): Promise<File> {
+	// An SVG has no pixels of its own; rasterise it the way the rest of the app
+	// does before anything can be re-encoded.
+	const bitmap = await createImageBitmap(file).catch(async () =>
+		createImageBitmap(await svgToPng(file, maxSide)),
+	);
+	try {
+		const scale = Math.min(1, maxSide / Math.max(1, bitmap.width, bitmap.height));
+		const canvas = document.createElement("canvas");
+		canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+		canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+		const ctx = canvas.getContext("2d");
+		if (!ctx) throw new Error("Canvas nicht verfügbar");
+		ctx.fillStyle = "#ffffff";
+		ctx.fillRect(0, 0, canvas.width, canvas.height);
+		ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+		const blob = await new Promise<Blob | null>((res) =>
+			canvas.toBlob(res, "image/jpeg", quality),
+		);
+		if (!blob) throw new Error("JPEG-Export fehlgeschlagen");
+		return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", {
+			type: "image/jpeg",
+		});
+	} finally {
+		bitmap.close();
+	}
+}
+
+/**
+ * One compressed copy per uploaded `File`, memoised.
+ *
+ * A render runs on every edit, and pushing a 2560×1600 PNG through a canvas
+ * takes long enough to be felt. The key is the `File` object itself: replacing
+ * an upload produces a new `File`, so the cache misses by construction and
+ * nothing ever has to be invalidated by hand.
+ */
+const pdfCopies = new WeakMap<File, Promise<File>>();
+
+/** `compressForPdf()` with a per-`File` memo, for use on the render path. */
+export function pdfCopyOf(file: File): Promise<File> {
+	const cached = pdfCopies.get(file);
+	if (cached) return cached;
+	const copy = compressForPdf(file).catch((err) => {
+		// Never cache a failure — the next render should try again.
+		pdfCopies.delete(file);
+		throw err;
+	});
+	pdfCopies.set(file, copy);
+	return copy;
+}

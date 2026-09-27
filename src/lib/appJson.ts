@@ -26,7 +26,8 @@ import { JOB_STATUSES, type Anrede, type JobData, type JobStatus } from "./job.j
 import type { LetterData, WorkSample } from "./letter.js";
 import type { SharedData } from "./shared.js";
 import type { CvData, CvEntry, CvSection } from "./cv.js";
-import { normalizeCv, isToggleable, skillLines, toggleableGroups } from "./cv.js";
+import { normalizeCv, isToggleable, skillLines, skillValueKey, toggleableEntries } from "./cv.js";
+import { SAMPLE_COMPRESSION_INFO } from "./images.js";
 import type { ExtraDocument, StaticData } from "./static.js";
 
 export const JSON_FORMAT = "cv-meister";
@@ -129,14 +130,17 @@ export interface DocumentNode {
 }
 
 /**
- * A category that may be switched off per application, with the values it
- * holds — the values are the whole point: "Programmierkenntnisse" alone says
- * nothing about whether the category fits a job.
+ * One switchable CV entry, addressed by the texts a reader sees: the section,
+ * the category and the single value — one line in the CV, e.g. "C#".
+ *
+ * The value is part of the identity on purpose. Tailoring an application means
+ * dropping *individual* skills (this job wants C# and Python, the next wants
+ * SQL), so a category is only the container, never the unit of choice.
  */
-export interface SwitchableSkill {
+export interface SkillEntryRef {
 	bereich: string;
 	kategorie: string;
-	werte: string[];
+	wert: string;
 }
 
 /** Everything an application needs, minus the per-job filter. */
@@ -165,19 +169,21 @@ export interface ApplicationNode {
 	 * Mapped back by text, never by ids.
 	 *
 	 * `verfuegbare*` is the menu an AI picks from. It cannot name a work sample
-	 * or a category it has never seen, so without the menu the two switch lists
-	 * are unfillable no matter how clearly they are labelled. Informational
-	 * only — ignored on import.
+	 * or a skill it has never seen, so without the menu the two switch lists are
+	 * unfillable no matter how clearly they are labelled. Informational only —
+	 * ignored on import.
 	 */
 	auswahl: {
 		hinweis: string;
 		/** The actual instruction. A merely descriptive hint was read as status quo. */
 		aufgabe: string;
 		fuehrerschein: JsonField<boolean>;
+		/** Whether the work samples are downscaled for preview and PDFs. */
+		bilderKomprimieren: JsonField<boolean>;
 		ausgeschalteteArbeitsproben: JsonField<string[]>;
-		ausgeschalteteKenntnisse: JsonField<{ bereich: string; kategorie: string }[]>;
+		ausgeschalteteWerte: JsonField<SkillEntryRef[]>;
 		verfuegbareArbeitsproben: JsonField<string[]>;
-		verfuegbareKenntnisse: JsonField<SwitchableSkill[]>;
+		verfuegbareWerte: JsonField<SkillEntryRef[]>;
 	};
 }
 
@@ -332,9 +338,10 @@ const ANLEITUNG_APP_TAIL = [
 	"Das ist eine Vorlage zum Ausfüllen: Felder mit leerem value sind die, die noch fehlen.",
 	"WICHTIG — bewerbung.auswahl ist ein AUFTRAG, kein Protokoll: lies dort zuerst aufgabe. Lebenslauf und",
 	"Arbeitsproben sind global und immer vollständig; sie werden nicht von selbst auf die Stelle zugeschnitten.",
-	"Die für diese Stelle irrelevanten Arbeitsproben und Kenntnisse-Kategorien musst du selbst in",
-	"ausgeschalteteArbeitsproben bzw. ausgeschalteteKenntnisse eintragen — trägst du nichts ein, bleibt alles sichtbar.",
-	"Auswählen darfst du nur aus den Menüs verfuegbareArbeitsproben und verfuegbareKenntnisse, die genau dafür",
+	"Die für diese Stelle irrelevanten Arbeitsproben und Lebenslauf-Einträge (einzelne Zeilen, z. B. eine",
+	"Programmiersprache) musst du selbst in ausgeschalteteArbeitsproben bzw. ausgeschalteteWerte eintragen",
+	"— trägst du nichts ein, bleibt alles sichtbar.",
+	"Auswählen darfst du nur aus den Menüs verfuegbareArbeitsproben und verfuegbareWerte, die genau dafür",
 	"im JSON stehen; beide werden beim Import ignoriert.",
 	"Absichtlich NICHT enthalten sind Lebenslauf und Arbeitsproben selbst — die sind global (Stammdaten)",
 	"und schon vollständig. Aus ihnen steht hier nur der Schaltzustand (bewerbung.auswahl) samt der Menüs",
@@ -449,9 +456,9 @@ export function cvNode(cv: CvData): CvNode {
 				kategorie: field("Kategorie (z. B. Sprachen)", g.category),
 				werte: field("Werte", g.values, "Ein Wert pro Zeile, *Wert* = fett"),
 				umschaltbar: field(
-					"Pro Bewerbung umschaltbar",
+					"Einträge pro Bewerbung umschaltbar",
 					isToggleable(g),
-					"Nur umschaltbare Kategorien erscheinen im Lebenslauf-Filter einer Bewerbung. Alles andere steht immer im Lebenslauf.",
+					"Nur die Einträge umschaltbarer Kategorien erscheinen im Lebenslauf-Filter einer Bewerbung. Alles andere steht immer im Lebenslauf.",
 				),
 			})),
 		})),
@@ -512,14 +519,18 @@ export function filterAsText(
 	job: JobData,
 	cv: CvData,
 	samples: WorkSample[],
-): Pick<ParsedApplication, "hiddenSkills" | "hiddenSampleTitles"> {
+): Pick<ParsedApplication, "hiddenValues" | "hiddenSampleTitles"> {
 	return {
-		// Only marked categories can be off, so only those are reported: a stale
-		// id must not make a fixed category look switched off.
-		hiddenSkills: cv.sections.flatMap((s) =>
+		// Only entries inside a marked category can be off, so only those are
+		// reported: a stale key must not make a fixed value look switched off.
+		hiddenValues: cv.sections.flatMap((s) =>
 			s.skills
-				.filter((g) => isToggleable(g) && g.id && job.hiddenSkillIds.includes(g.id))
-				.map((g) => ({ bereich: s.title, kategorie: g.category })),
+				.filter(isToggleable)
+				.flatMap((g) =>
+					skillLines(g.values)
+						.filter((v) => g.id && job.hiddenSkillValues.includes(skillValueKey(g, v)))
+						.map((v) => ({ bereich: s.title, kategorie: g.category, wert: v })),
+				),
 		),
 		hiddenSampleTitles: samples
 			.filter((s) => s.id && job.hiddenSampleIds.includes(s.id))
@@ -538,20 +549,21 @@ export function filterAsText(
  */
 export const AUSWAHL_AUFGABE =
 	"AUFTRAG: Entscheide, welche Einträge für DIESE Stelle irrelevant sind, und trage sie in "
-	+ "ausgeschalteteArbeitsproben bzw. ausgeschalteteKenntnisse ein. "
+	+ "ausgeschalteteArbeitsproben bzw. ausgeschalteteWerte ein. "
 	+ "Lebenslauf und Arbeitsproben sind Stammdaten und enthalten immer ALLES, was vorhanden ist "
 	+ "— sie werden NICHT von selbst auf die Stelle zugeschnitten. Alles, was du nicht einträgst, "
 	+ "bleibt in dieser Bewerbung sichtbar. Die Auswahl triffst du ausschließlich aus "
-	+ "verfuegbareArbeitsproben und verfuegbareKenntnisse (wörtlich übernehmen); erfinde keine "
+	+ "verfuegbareArbeitsproben und verfuegbareWerte (wörtlich übernehmen); erfinde keine "
 	+ "Einträge. Im Zweifel lieber drinlassen.";
 
 export const AUSWAHL_HINWEIS =
-	"Formale Regeln: Alles, was hier NICHT steht, ist eingeschaltet. Abschalten lassen sich nur "
-	+ "Kenntnisse, die im Lebenslauf als „umschaltbar“ markiert sind — alle anderen stehen immer "
-	+ "drin. Die Zuordnung passiert beim Import über die Texte (Abschnitt/Kategorie bzw. "
-	+ "Probentitel), nicht über IDs — Umbenennen setzt die Auswahl für den Eintrag zurück. "
-	+ "verfuegbareArbeitsproben und verfuegbareKenntnisse sind nur zur Information und werden "
-	+ "beim Import ignoriert.";
+	"Formale Regeln: Alles, was hier NICHT steht, ist eingeschaltet. Abgeschaltet wird einzeln — "
+	+ "ein Eintrag ist eine Zeile im Lebenslauf (z. B. „Python“), keine ganze Kategorie. Abschalten "
+	+ "lassen sich nur Einträge aus Kategorien, die im Lebenslauf als „umschaltbar“ markiert sind "
+	+ "— alles andere steht immer drin. Die Zuordnung passiert beim Import über die Texte "
+	+ "(Abschnitt/Kategorie/Eintrag bzw. Probentitel), nicht über IDs — Umbenennen setzt die "
+	+ "Auswahl für den Eintrag zurück. verfuegbareArbeitsproben und verfuegbareWerte sind nur zur "
+	+ "Information und werden beim Import ignoriert.";
 
 /**
  * Hint for the mail text. Shared between the JSON and the UI so the two cannot
@@ -576,14 +588,12 @@ export const EMAIL_TEXT_INFO =
 function applicationNode(input: ApplicationInput, withImages = false) {
 	const { job, samples, logoUrl, logoName } = input;
 	const filter = filterAsText(job, input.cv, samples);
-	// The menu an AI picks from. Only marked categories can be switched off, and
-	// their values are what makes the choice possible at all — a bare category
-	// name says nothing about whether it fits the job.
-	const switchableSkills = toggleableGroups(input.cv).map(({ section, group }) => ({
-		bereich: section.title,
-		kategorie: group.category,
-		werte: skillLines(group.values),
-	}));
+	// The menu an AI picks from: every entry inside a marked category, flattened.
+	// The entry itself is the unit of choice — a bare category name would not say
+	// which of its skills fits the job.
+	const switchableEntries = toggleableEntries(input.cv).flatMap(({ section, group, values }) =>
+		values.map((wert) => ({ bereich: section.title, kategorie: group.category, wert })),
+	);
 	const logo: JsonFileRef = {
 		vorhanden: !!logoName,
 		name: logoName,
@@ -649,25 +659,30 @@ function applicationNode(input: ApplicationInput, withImages = false) {
 				job.fuehrerschein,
 				"Blendet den Führerschein aus dem globalen Lebenslauf in dieser Bewerbung ein oder aus.",
 			),
+			bilderKomprimieren: field(
+				"Bilder komprimieren",
+				job.compressImages,
+				SAMPLE_COMPRESSION_INFO,
+			),
 			ausgeschalteteArbeitsproben: field(
 				"Arbeitsproben, die in DIESER Bewerbung nicht gezeigt werden",
 				filter.hiddenSampleTitles,
 				"Titel wörtlich aus verfuegbareArbeitsproben.value übernehmen. Leer = alle Arbeitsproben werden gezeigt.",
 			),
-			ausgeschalteteKenntnisse: field(
-				"Kenntnisse-Kategorien, die in DIESER Bewerbung nicht gezeigt werden",
-				filter.hiddenSkills,
-				'Je Eintrag {"bereich": "<Abschnitt>", "kategorie": "<Kategorie>"} wörtlich aus verfuegbareKenntnisse.value übernehmen. Leer = alle Kategorien werden gezeigt.',
+			ausgeschalteteWerte: field(
+				"Einträge, die in DIESER Bewerbung nicht gezeigt werden",
+				filter.hiddenValues,
+				'Je Eintrag {"bereich": "<Abschnitt>", "kategorie": "<Kategorie>", "wert": "<Eintrag>"} wörtlich aus verfuegbareWerte.value übernehmen. Ein Eintrag ist eine einzelne Zeile, z. B. eine Programmiersprache. Leer = alles wird gezeigt.',
 			),
 			verfuegbareArbeitsproben: field(
 				"Verfügbare Arbeitsproben (nur zur Information, wird beim Import ignoriert)",
 				samples.map((s) => s.title),
 				"Der vollständige Pool. Nur hieraus darf oben abgeschaltet werden.",
 			),
-			verfuegbareKenntnisse: field(
-				"Umschaltbare Kenntnisse-Kategorien (nur zur Information, wird beim Import ignoriert)",
-				switchableSkills,
-				"Nur diese Kategorien lassen sich abschalten — alle anderen Kenntnisse stehen immer im Lebenslauf. „werte“ ist der Inhalt der Kategorie und entscheidet, ob sie zur Stelle passt.",
+			verfuegbareWerte: field(
+				"Umschaltbare Einträge (nur zur Information, wird beim Import ignoriert)",
+				switchableEntries,
+				"Nur diese Einträge lassen sich abschalten — alles andere steht immer im Lebenslauf. Ist eine Kategorie hier mit allen ihren Zeilen vertreten, verschwindet sie ganz, sobald alle abgeschaltet sind.",
 			),
 		},
 	};
@@ -784,6 +799,13 @@ export interface ParsedApplication {
 	job: Partial<JobData> & { id: string };
 	letter: LetterData;
 	hiddenSampleTitles: string[];
+	/** Single CV entries switched off, addressed by text. */
+	hiddenValues: SkillEntryRef[];
+	/**
+	 * Whole categories switched off by an older file, from when the switch sat
+	 * one level higher. Expanded to their current values in `applyFilters` —
+	 * the first place that has the CV at hand.
+	 */
 	hiddenSkills: { bereich: string; kategorie: string }[];
 	shared: SharedData | null;
 	logoUrl: string | null;
@@ -939,9 +961,12 @@ export function readApplicationNode(node: unknown, fallbackJobId: string): Parse
 			body: readString(anschreiben.text),
 			closing: readString(anschreiben.grussformel, "Mit freundlichen Grüßen"),
 		},
-		hiddenSkillIds: [],
+		hiddenSkillValues: [],
 		hiddenSampleIds: [],
 		fuehrerschein: readBool(auswahl.fuehrerschein, false),
+		// Absent in files written before the switch existed: on is the default,
+		// not an unknown.
+		compressImages: readBool(auswahl.bilderKomprimieren, true),
 	};
 
 	// Both the current and the legacy key names are read, and `unwrap` accepts
@@ -950,11 +975,21 @@ export function readApplicationNode(node: unknown, fallbackJobId: string): Parse
 	// self-describing. Without that, the filter was silently dropped on every
 	// import of a file written before the change.
 	const sampleTitles = unwrap(auswahl.ausgeschalteteArbeitsproben ?? auswahl.ausgeblendeteProben);
+	const valueEntries = unwrap(auswahl.ausgeschalteteWerte);
 	const skillEntries = unwrap(auswahl.ausgeschalteteKenntnisse ?? auswahl.ausgeblendeteKenntnisse);
 
 	const hiddenSampleTitles = Array.isArray(sampleTitles)
 		? sampleTitles.filter((t): t is string => typeof t === "string")
 		: [];
+	const hiddenValues = Array.isArray(valueEntries)
+		? (valueEntries as Record<string, unknown>[]).map((e) => ({
+				bereich: readString(e.bereich),
+				kategorie: readString(e.kategorie),
+				wert: readString(e.wert),
+			}))
+		: [];
+	// Files written while the switch sat on the category: kept so `applyFilters`
+	// can expand them instead of dropping the user's earlier selection.
 	const hiddenSkills = Array.isArray(skillEntries)
 		? (skillEntries as Record<string, unknown>[]).map((e) => ({
 				bereich: readString(e.bereich),
@@ -965,6 +1000,7 @@ export function readApplicationNode(node: unknown, fallbackJobId: string): Parse
 		job,
 		letter: job.letter as LetterData,
 		hiddenSampleTitles,
+		hiddenValues,
 		hiddenSkills,
 		shared: null,
 		logoUrl: logo.url,
@@ -1065,19 +1101,43 @@ export function applyFilters(
 	job: JobData,
 	cv: CvData,
 	samples: WorkSample[],
-	parsed: Pick<ParsedApplication, "hiddenSkills" | "hiddenSampleTitles">,
+	parsed: Pick<ParsedApplication, "hiddenValues" | "hiddenSampleTitles"> & {
+		hiddenSkills?: ParsedApplication["hiddenSkills"];
+	},
 ): void {
-	job.hiddenSkillIds = [];
+	job.hiddenSkillValues = [];
 	job.hiddenSampleIds = [];
 
-	for (const { bereich, kategorie } of parsed.hiddenSkills) {
+	/** Adds the key of `wert` in every matching section/category. */
+	const hide = (bereich: string, kategorie: string, wert: string) => {
 		for (const s of cv.sections) {
 			if (s.title !== bereich) continue;
 			for (const g of s.skills) {
-				if (g.category === kategorie && g.id) job.hiddenSkillIds.push(g.id);
+				if (g.category !== kategorie || !g.id) continue;
+				if (skillLines(g.values).includes(wert)) {
+					job.hiddenSkillValues.push(skillValueKey(g, wert));
+				}
+			}
+		}
+	};
+
+	for (const { bereich, kategorie, wert } of parsed.hiddenValues) {
+		hide(bereich, kategorie, wert);
+	}
+
+	// Older files switched whole categories off. There is no category switch any
+	// more, so expand such an entry to every value the category has today.
+	// Dropping it silently would be worse than a slightly broader filter.
+	for (const { bereich, kategorie } of parsed.hiddenSkills ?? []) {
+		for (const s of cv.sections) {
+			if (s.title !== bereich) continue;
+			for (const g of s.skills) {
+				if (g.category !== kategorie || !g.id) continue;
+				for (const v of skillLines(g.values)) hide(bereich, kategorie, v);
 			}
 		}
 	}
+
 	for (const title of parsed.hiddenSampleTitles) {
 		for (const s of samples) {
 			if (s.title === title && s.id) job.hiddenSampleIds.push(s.id);

@@ -3,7 +3,7 @@ import { buildLetterSource, type LetterData, type WorkSample } from "$lib/letter
 import { buildCvSource, type CvData } from "$lib/cv";
 import type { SharedData } from "$lib/shared";
 import type { JobData } from "$lib/job";
-import { logoExt, tintSignatureImage } from "$lib/images";
+import { logoExt, pdfCopyOf, tintSignatureImage } from "$lib/images";
 import modernCvTemplate from "$lib/typst/modern-cv-local.typ?raw";
 import langToml from "$lib/typst/lang.toml?raw";
 
@@ -105,7 +105,8 @@ async function readBytes(file: File): Promise<Uint8Array> {
 /**
  * Prepares the virtual files for a letter: truthful extensions (Typst picks
  * the decoder by extension), signature tinted in the job's accent color,
- * samples cloned with their image paths. Pure w.r.t. app state.
+ * samples cloned with their image paths — and, unless the job turns it off,
+ * downscaled to a JPEG for the render. Pure w.r.t. app state.
  */
 async function buildLetterFiles(
 	job: JobData,
@@ -139,12 +140,25 @@ async function buildLetterFiles(
 	const prepared: WorkSample[] = [];
 	let idx = 0;
 	for (const s of visibleSamples(allSamples, job)) {
-		const file = s.id ? assets.sampleFiles?.[s.id] : undefined;
-		if (!file) {
+		const uploaded = s.id ? assets.sampleFiles?.[s.id] : undefined;
+		if (!uploaded) {
 			prepared.push({ ...s, image: undefined });
 			continue;
 		}
-		const path = `sample-${idx}.png`;
+		// Only the rendered copy is compressed; the stored original is never
+		// touched. A failure (no canvas, undecodable file) falls back to the
+		// original instead of dropping the image.
+		let file = uploaded;
+		if (job.compressImages) {
+			try {
+				file = await pdfCopyOf(uploaded);
+			} catch {
+				file = uploaded;
+			}
+		}
+		// Typst picks the decoder by extension, so the path follows the real
+		// format — JPEG bytes behind a `.png` name would go to the PNG decoder.
+		const path = `sample-${idx}${logoExt(file.name, file.type)}`;
 		idx++;
 		binaries[path] = await readBytes(file);
 		prepared.push({ ...s, image: path });
