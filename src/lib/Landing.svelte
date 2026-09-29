@@ -17,16 +17,19 @@
 	 */
 	let { onStart }: { onStart: () => void } = $props();
 
-	/** MailerLite form of this project (account 2668691). */
+	/**
+	 * MailerLite form of this project (account 2668691). Used as the form's
+	 * `action` — the signup is submitted by the browser itself, not by script.
+	 */
 	const SUBSCRIBE_URL =
 		"https://assets.mailerlite.com/jsonp/2668691/forms/199914375195133102/subscribe";
-	/** MailerLite pings this when a form is shown; sent alongside, best effort. */
-	const TAKEL_URL = "https://assets.mailerlite.com/jsonp/2668691/forms/199914375195133102/takel";
 
 	let email = $state("");
-	/** idle -> sending -> done | error */
-	let status = $state<"idle" | "sending" | "done" | "error">("idle");
+	/** idle -> sending -> done */
+	let status = $state<"idle" | "sending" | "done">("idle");
 	let emailEl = $state<HTMLInputElement | undefined>();
+	let formEl = $state<HTMLFormElement | undefined>();
+	let frameEl = $state<HTMLIFrameElement | undefined>();
 
 	/**
 	 * Moves the caret into the e-mail field. Every CTA funnels here: the
@@ -39,35 +42,68 @@
 	}
 
 	/**
-	 * Subscribes the address and then opens the editor.
+	 * Submits the signup as an ordinary HTML form POST — the only way we send it.
 	 *
-	 * The endpoint answers with CORS headers (`access-control-allow-origin: *`)
-	 * and a JSON body (`{success:true}` / `{success:false,errors:…}`), so the real
-	 * result is readable — a failed signup keeps the visitor here with an error
-	 * instead of silently pretending it worked.
+	 * A `fetch()` to `assets.mailerlite.com` is refused by ad blockers with
+	 * `ERR_BLOCKED_BY_CLIENT` before anything leaves the browser, and that refusal
+	 * cannot be worked around from page script: the request never happens, so
+	 * there is no error to catch and no CORS trick to apply. An ordinary form
+	 * submission is treated as a document load instead and normally passes. Not
+	 * even attempting the scripted request also keeps the console clean.
+	 *
+	 * The POST is aimed at a hidden iframe, so the browser stays on this page
+	 * rather than navigating to the endpoint's raw JSON. `submit` is called off
+	 * `HTMLFormElement.prototype` because a field named "submit" would shadow it.
+	 *
+	 * Resolves on the iframe's `load`, or after a short grace period: a blocked
+	 * iframe may never fire one, and the visitor must not be left waiting.
+	 */
+	function postNatively(): Promise<void> {
+		const form = formEl;
+		const frame = frameEl;
+		if (!form) return Promise.resolve();
+		if (!frame) {
+			HTMLFormElement.prototype.submit.call(form);
+			return Promise.resolve();
+		}
+		return new Promise((resolve) => {
+			let settled = false;
+			const finish = () => {
+				if (settled) return;
+				settled = true;
+				frame.removeEventListener("load", finish);
+				resolve();
+			};
+			frame.addEventListener("load", finish);
+			setTimeout(finish, 1500);
+			HTMLFormElement.prototype.submit.call(form);
+		});
+	}
+
+	/**
+	 * Hands the address to MailerLite and then opens the editor.
+	 *
+	 * The browser performs the POST, so we cannot read the answer — the endpoint
+	 * is cross-origin and the reply lands in the hidden iframe. That is the price
+	 * of a submission no ad blocker kills: no `success` flag and no rejection we
+	 * could report. Two consequences: a malformed address is caught only by the
+	 * input's own `type="email"`/`required` validation, and the editor opens
+	 * either way — our marketing form must never become a locked door in front of
+	 * the product.
 	 */
 	async function subscribe(e: SubmitEvent) {
 		e.preventDefault();
 		const address = email.trim();
 		if (!address || status === "sending") return;
+
+		// Write the trimmed address back: the POST carries the DOM value, not
+		// `email`, so trailing whitespace would otherwise go out as typed.
+		email = address;
+
 		status = "sending";
-		try {
-			const res = await fetch(SUBSCRIBE_URL, {
-				method: "POST",
-				headers: { "Content-Type": "application/x-www-form-urlencoded" },
-				body: new URLSearchParams({
-					"fields[email]": address,
-					"ml-submit": "1",
-					anticsrf: "true",
-				}),
-			});
-			const data = await res.json().catch(() => null);
-			status = res.ok && data?.success !== false ? "done" : "error";
-			void fetch(TAKEL_URL, { mode: "no-cors" }).catch(() => {});
-		} catch {
-			status = "error";
-		}
-		if (status === "done") onStart();
+		await postNatively();
+		status = "done";
+		onStart();
 	}
 
 	const steps = [
@@ -177,7 +213,7 @@
 			</div>
 
 			<h1 class="text-4xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight text-white mb-6 leading-tight">
-				Traumjob finden. Link einfügen. <br />
+				Traumjob finden. <br />
 				<span
 					class="bg-gradient-to-br from-[#60a5fa] via-[#a78bfa] to-[#34d399] bg-clip-text text-transparent"
 					>Passgenau beworben.</span
@@ -191,7 +227,19 @@
 
 			<!-- Newsletter → Editor -->
 			<div class="max-w-2xl mx-auto bg-[#131c31] p-3 sm:p-4 rounded-2xl border border-gray-800 shadow-[0_0_50px_rgba(139,92,246,0.2)]">
-				<form onsubmit={subscribe} class="flex flex-col sm:flex-row gap-3">
+				<!-- Real action/method/target: subscribe() submits this form the
+				     ordinary way (see postNatively) rather than with fetch(), so an
+				     ad blocker that refuses scripted requests to MailerLite cannot
+				     swallow the signup. The hidden iframe is the target, so the
+				     browser stays here instead of showing the endpoint's raw JSON. -->
+				<form
+					bind:this={formEl}
+					onsubmit={subscribe}
+					action={SUBSCRIBE_URL}
+					method="POST"
+					target="ml-subscribe"
+					class="flex flex-col sm:flex-row gap-3"
+				>
 					<div class="relative flex-grow">
 						<div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-gray-400">
 							<svg
@@ -210,6 +258,7 @@
 						</div>
 						<input
 							id="newsletter-email"
+							name="fields[email]"
 							type="email"
 							required
 							autocomplete="email"
@@ -246,13 +295,21 @@
 							</svg>
 						{/if}
 					</button>
+
+					<!-- MailerLite's own fields, so the POST carries the payload its
+					     form expects. -->
+					<input type="hidden" name="ml-submit" value="1" />
+					<input type="hidden" name="anticsrf" value="true" />
 				</form>
 
-				{#if status === "error"}
-					<p id="newsletter-error" role="alert" class="text-xs text-red-400 mt-3 px-1">
-						Der Newsletter-Eintrag hat nicht geklappt. Bitte noch einmal versuchen.
-					</p>
-				{/if}
+				<iframe
+					bind:this={frameEl}
+					name="ml-subscribe"
+					title="Newsletter-Anmeldung"
+					aria-hidden="true"
+					tabindex="-1"
+					class="hidden"
+				></iframe>
 			</div>
 
 			<p id="newsletter-note" class="text-xs text-gray-500 mt-4">
