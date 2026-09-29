@@ -56,6 +56,7 @@
 	import { buildMotivationPrompt, buildCoverPrompt, buildMailPrompt } from "$lib/prompt";
 	import { requestGoogleToken, sendGmail, type MailAttachment } from "$lib/gmail";
 	import { loadState, saveState, type PersistedState } from "$lib/storage";
+	import { jsonHintSeen, markJsonHintSeen, visitorEmail } from "$lib/visitor";
 	import Landing from "$lib/Landing.svelte";
 
 	type View = "dashboard" | "detail" | "static";
@@ -186,6 +187,8 @@
 	let logoUrlOpen = $state(false);
 	/** The accent-colour picker dialog (triggered from the swatch). */
 	let colorPickerOpen = $state(false);
+	/** One-time hint about the JSON → LLM → JSON round trip (see jsonHintSeen). */
+	let jsonHintOpen = $state(false);
 	let logoUrlInput = $state("");
 	let logoUrlBusy = $state(false);
 	/** The dialog's text field, so opening it can put the cursor there. */
@@ -221,6 +224,19 @@
 
 	function wantsEditor(): boolean {
 		return /^#\/?editor\b/i.test(window.location.hash);
+	}
+
+	/**
+	 * True while "#start" is in the URL.
+	 *
+	 * Needed because a returning visitor (one who already signed up) is sent
+	 * straight to the editor from a bare "/" — but must still be able to reach
+	 * the landing page deliberately, which is exactly what the editor's
+	 * "Startseite" link does. Without this distinction that link would bounce
+	 * straight back into the editor.
+	 */
+	function wantsLanding(): boolean {
+		return /^#\/?start\b/i.test(window.location.hash);
 	}
 
 	/**
@@ -1615,10 +1631,13 @@
 	}
 
 	onMount(() => {
-		// Deep link: "#editor" starts the editor straight away, everything else
-		// shows the landing page and only hydrates the stored workspace.
-		editorActive = wantsEditor();
-		if (editorActive) void startEditor();
+		// Deep link: "#editor" starts the editor straight away. A bare "/" sends a
+		// visitor who has already signed up straight there as well — the landing
+		// page is a one-time step, not a gate in front of the product. An explicit
+		// "#start" always wins, so the editor's "Startseite" link keeps working.
+		editorActive = wantsEditor() || (visitorEmail() !== "" && !wantsLanding());
+		if (wantsEditor()) void startEditor();
+		else if (editorActive) startFromLanding();
 		else void ensureHydrated();
 		window.addEventListener("hashchange", syncRoute);
 		document.addEventListener("visibilitychange", handleVisibility);
@@ -1671,6 +1690,22 @@
 	$effect(() => {
 		if (previewDoc === "mail" && !mailAvailable) previewDoc = "letter";
 	});
+
+	// --- One-time hint: the JSON → LLM → JSON round trip --------------------
+	// Shown the first time the visitor is inside a Bewerbung. That is both where
+	// the JSON buttons live and where creating a new one lands (addJob →
+	// selectJob → view "detail"), so it covers "created a new application" and
+	// "opened an existing one" with a single rule. Dismissing it is permanent —
+	// the flag lives in localStorage, not in the workspace, so resetting the
+	// workspace does not bring the hint back.
+	$effect(() => {
+		if (view === "detail" && !jsonHintSeen()) jsonHintOpen = true;
+	});
+
+	function dismissJsonHint() {
+		jsonHintOpen = false;
+		markJsonHintSeen();
+	}
 
 	const inputCls =
 		"w-full px-2.5 py-1.5 bg-[#0a0f1d] border border-[#1e293b] rounded text-xs text-slate-200 focus:outline-none focus:border-blue-500";
@@ -1875,7 +1910,7 @@
 			<!-- Editor -->
 			<div class="flex-1 overflow-y-auto p-6 min-h-0">
 				{#if view === "dashboard"}
-					<div class="space-y-4 max-w-5xl">
+					<div id="job-dashboard" class="space-y-4 max-w-5xl">
 						<div class="flex items-center justify-between">
 							<h2 class="text-xs font-bold text-slate-400 uppercase tracking-wider">
 								Aktive Bewerbungen
@@ -1970,7 +2005,7 @@
 						</div>
 					</div>
 				{:else if view === "detail"}
-					<div class="space-y-4 max-w-5xl mx-auto">
+					<div id="job-detail" class="space-y-4 max-w-5xl mx-auto">
 						<div class="flex items-center justify-between bg-[#131b2e] border border-[#1e293b] rounded-lg p-3">
 							<button
 								onclick={() => switchView("dashboard")}
@@ -3007,6 +3042,90 @@
 						{logoUrlBusy ? "Lädt …" : "Laden"}
 					</button>
 				</div>
+			</div>
+		</div>
+	{/if}
+
+	{#if jsonHintOpen}
+		<div id="json-hint" class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3">
+			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-lg w-full p-5 space-y-4">
+				<div class="flex items-start gap-3">
+					<!-- Inline SVG, not `material-symbols-outlined`: that font is a
+					     subset carrying only content_copy + check, so any other name
+					     (auto_awesome, lightbulb, …) renders as literal text. -->
+					<svg
+						class="w-6 h-6 text-blue-400 shrink-0 mt-0.5"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.8"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="M12 3v3.5M12 17.5V21M3 12h3.5M17.5 12H21" />
+						<path d="M5.9 5.9 8.4 8.4M15.6 15.6l2.5 2.5M18.1 5.9 15.6 8.4M8.4 15.6 5.9 18.1" />
+					</svg>
+					<div>
+						<h3 class="text-sm font-bold text-slate-100">Schreiben musst du hier nichts</h3>
+						<p class="text-[11px] text-slate-400 mt-1 leading-relaxed">
+							Kopiere das JSON dieser Bewerbung, schicke es einem LLM mit Chatbot (ChatGPT,
+							Claude, Gemini …) und importiere dessen Antwort wieder.
+						</p>
+					</div>
+				</div>
+
+				<ol class="space-y-2.5 text-[11px] text-slate-300 leading-relaxed">
+					<li class="flex gap-2.5">
+						<span
+							class="shrink-0 w-5 h-5 rounded-full bg-slate-800 text-slate-300 flex items-center justify-center font-bold text-[10px]"
+							>1</span
+						>
+						<span>
+							Oben rechts <span class="font-semibold text-slate-100">„JSON kopieren“</span> — die
+							Bewerbung liegt dann in der Zwischenablage.
+						</span>
+					</li>
+					<li class="flex gap-2.5">
+						<span
+							class="shrink-0 w-5 h-5 rounded-full bg-slate-800 text-slate-300 flex items-center justify-center font-bold text-[10px]"
+							>2</span
+						>
+						<span>
+							Ins Chatfenster einfügen und abschicken. Ein zusätzlicher Prompt ist nicht nötig:
+							das JSON beschreibt jedes Feld selbst.
+						</span>
+					</li>
+					<li class="flex gap-2.5">
+						<span
+							class="shrink-0 w-5 h-5 rounded-full bg-slate-800 text-slate-300 flex items-center justify-center font-bold text-[10px]"
+							>3</span
+						>
+						<span>
+							Die JSON-Antwort kopieren und hier
+							<span class="font-semibold text-slate-100">„JSON importieren“</span> drücken — die
+							Bewerbung ist damit ausgefüllt.
+						</span>
+					</li>
+				</ol>
+
+				<p
+					class="text-[11px] text-slate-300 bg-[#0a0f1d] border border-[#1e293b] rounded-md p-3 leading-relaxed"
+				>
+					<span class="font-semibold text-slate-100">Damit die KI die Stelle kennt:</span>
+					trag oben den <span class="font-semibold text-slate-100">Stellen-Link (URL)</span> ein und
+					zusätzlich den
+					<span class="font-semibold text-slate-100">Stellenausschreibungstext</span>. Viele Chatbots
+					können Stellenportale nicht selbst öffnen — dann ist der Text ihre einzige Quelle. Beides
+					steht im JSON und geht damit automatisch mit.
+				</p>
+
+				<button
+					onclick={dismissJsonHint}
+					class="w-full px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold transition"
+				>
+					Verstanden
+				</button>
 			</div>
 		</div>
 	{/if}

@@ -15,6 +15,9 @@
 	 * Styling: Tailwind v4 with arbitrary colour values (no CDN, no config
 	 * extension) so the page works offline and on GitHub Pages.
 	 */
+	import { onMount } from "svelte";
+	import { rememberVisitor, visitorEmail } from "$lib/visitor";
+
 	let { onStart }: { onStart: () => void } = $props();
 
 	/**
@@ -40,6 +43,21 @@
 		emailEl?.scrollIntoView({ block: "center", behavior: "smooth" });
 		emailEl?.focus({ preventScroll: true });
 	}
+
+	/**
+	 * Prefills the address of a returning visitor.
+	 *
+	 * Deliberately not part of the initial state: this page is prerendered, so
+	 * reading localStorage while the component is created would make the client's
+	 * first render differ from the server's HTML. By the time this runs the
+	 * markup already matches and the field is simply filled in. Only ever
+	 * visible when someone opens the landing deliberately via "#start" — a
+	 * returning visitor is sent to the editor before seeing this page.
+	 */
+	onMount(() => {
+		const saved = visitorEmail();
+		if (saved && !email) email = saved;
+	});
 
 	/**
 	 * Submits the signup as an ordinary HTML form POST — the only way we send it.
@@ -102,6 +120,9 @@
 
 		status = "sending";
 		await postNatively();
+		// The signup went out — remember it, so a bare "/" goes straight to the
+		// editor from now on instead of showing this page a second time.
+		rememberVisitor(address);
 		status = "done";
 		onStart();
 	}
