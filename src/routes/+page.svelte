@@ -218,8 +218,6 @@
 	let hydratePromise: Promise<void> | null = null;
 	/** Set once the first PDF compile was kicked off. */
 	let editorRendered = false;
-	/** Job-ad URL handed over from the landing page, applied after hydrate. */
-	let pendingJobLink: string | null = null;
 
 	function wantsEditor(): boolean {
 		return /^#\/?editor\b/i.test(window.location.hash);
@@ -243,29 +241,13 @@
 	/** Starts the editor (idempotent): hydrate, then compile the preview once. */
 	async function startEditor() {
 		await ensureHydrated();
-		if (pendingJobLink) {
-			applyPendingJobLink(); // selectJob() already triggers a render
-			return;
-		}
 		if (editorRendered) return;
 		editorRendered = true;
 		render();
 	}
 
-	/** Turns a handed-over Stellen-Link into a fresh Bewerbung. */
-	function applyPendingJobLink() {
-		const link = pendingJobLink;
-		pendingJobLink = null;
-		if (!link) return;
-		const job = createJob({ link, status: "Entwurf" });
-		jobs.unshift(job);
-		filesFor(job.id);
-		selectJob(job.id);
-	}
-
-	/** Landing page → editor. Optionally carries a pasted job-ad URL. */
-	function startFromLanding(link?: string) {
-		if (link) pendingJobLink = link;
+	/** Landing page → editor (the landing's CTAs only focus its e-mail field). */
+	function startFromLanding() {
 		editorActive = true;
 		if (wantsEditor()) void startEditor();
 		else window.location.hash = "editor";

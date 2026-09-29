@@ -2,21 +2,72 @@
 	/**
 	 * Marketing landing page — shown at "/" (no hash) or "#start".
 	 *
-	 * Every CTA is a plain `<a href="#editor">`, so navigation is handled by the
-	 * hash listener in +page.svelte (that also makes the editor bookmarkable).
-	 * Only the hero form needs JS: it forwards the pasted job-ad URL so the
-	 * editor can create a matching Bewerbung right away.
+	 * The hero form is the single conversion step: it takes an e-mail address,
+	 * registers it with this project's MailerLite form and only then hands over
+	 * to the editor. Only the submit *target* is MailerLite's — the markup and
+	 * the styling are ours (their embed CSS is deliberately not used).
+	 *
+	 * Because of that, the big CTAs do not navigate any more: they move the caret
+	 * into that e-mail field. Plain text links still reach the editor, so a
+	 * MailerLite outage cannot lock anyone out. Navigation itself is handled by
+	 * the hash listener in +page.svelte (that also makes the editor bookmarkable).
 	 *
 	 * Styling: Tailwind v4 with arbitrary colour values (no CDN, no config
 	 * extension) so the page works offline and on GitHub Pages.
 	 */
-	let { onStart }: { onStart: (link?: string) => void } = $props();
+	let { onStart }: { onStart: () => void } = $props();
 
-	let jobUrl = $state("");
+	/** MailerLite form of this project (account 2668691). */
+	const SUBSCRIBE_URL =
+		"https://assets.mailerlite.com/jsonp/2668691/forms/199914375195133102/subscribe";
+	/** MailerLite pings this when a form is shown; sent alongside, best effort. */
+	const TAKEL_URL = "https://assets.mailerlite.com/jsonp/2668691/forms/199914375195133102/takel";
 
-	function submit(e: SubmitEvent) {
+	let email = $state("");
+	/** idle -> sending -> done | error */
+	let status = $state<"idle" | "sending" | "done" | "error">("idle");
+	let emailEl = $state<HTMLInputElement | undefined>();
+
+	/**
+	 * Moves the caret into the e-mail field. Every CTA funnels here: the
+	 * newsletter signup is the only conversion step, so a button that used to
+	 * jump straight into the editor first asks for the address.
+	 */
+	function focusEmail() {
+		emailEl?.scrollIntoView({ block: "center", behavior: "smooth" });
+		emailEl?.focus({ preventScroll: true });
+	}
+
+	/**
+	 * Subscribes the address and then opens the editor.
+	 *
+	 * The endpoint answers with CORS headers (`access-control-allow-origin: *`)
+	 * and a JSON body (`{success:true}` / `{success:false,errors:…}`), so the real
+	 * result is readable — a failed signup keeps the visitor here with an error
+	 * instead of silently pretending it worked.
+	 */
+	async function subscribe(e: SubmitEvent) {
 		e.preventDefault();
-		onStart(jobUrl.trim() || undefined);
+		const address = email.trim();
+		if (!address || status === "sending") return;
+		status = "sending";
+		try {
+			const res = await fetch(SUBSCRIBE_URL, {
+				method: "POST",
+				headers: { "Content-Type": "application/x-www-form-urlencoded" },
+				body: new URLSearchParams({
+					"fields[email]": address,
+					"ml-submit": "1",
+					anticsrf: "true",
+				}),
+			});
+			const data = await res.json().catch(() => null);
+			status = res.ok && data?.success !== false ? "done" : "error";
+			void fetch(TAKEL_URL, { mode: "no-cors" }).catch(() => {});
+		} catch {
+			status = "error";
+		}
+		if (status === "done") onStart();
 	}
 
 	const steps = [
@@ -100,12 +151,14 @@
 				<a href="#preview" class={navCls}>Vorschau</a>
 			</nav>
 
-			<a
-				href="#editor"
+			<button
+				type="button"
+				id="cta-header"
+				onclick={focusEmail}
 				class="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold px-5 py-2.5 rounded-xl shadow-[0_0_25px_rgba(59,130,246,0.3)] transition transform hover:-translate-y-0.5 text-sm shrink-0"
 			>
 				Editor öffnen
-			</a>
+			</button>
 		</div>
 	</header>
 
@@ -136,9 +189,9 @@
 				im Editor anpassen, als PDF exportieren. Deine Daten bleiben dabei auf deinem Gerät.
 			</p>
 
-			<!-- Stellen-Link → Editor -->
+			<!-- Newsletter → Editor -->
 			<div class="max-w-2xl mx-auto bg-[#131c31] p-3 sm:p-4 rounded-2xl border border-gray-800 shadow-[0_0_50px_rgba(139,92,246,0.2)]">
-				<form onsubmit={submit} class="flex flex-col sm:flex-row gap-3">
+				<form onsubmit={subscribe} class="flex flex-col sm:flex-row gap-3">
 					<div class="relative flex-grow">
 						<div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-gray-400">
 							<svg
@@ -148,43 +201,68 @@
 								stroke="currentColor"
 								stroke-width="2"
 								stroke-linecap="round"
+								stroke-linejoin="round"
 								aria-hidden="true"
 							>
-								<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" />
-								<path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" />
+								<rect x="2.5" y="4.5" width="19" height="15" rx="2.5" />
+								<path d="m3.2 6.8 8.8 5.9 8.8-5.9" />
 							</svg>
 						</div>
 						<input
-							type="url"
-							bind:value={jobUrl}
+							id="newsletter-email"
+							type="email"
+							required
+							autocomplete="email"
+							aria-label="E-Mail-Adresse"
+							bind:value={email}
+							bind:this={emailEl}
 							class="w-full pl-11 pr-4 py-3.5 bg-[#0a0f1d] border border-gray-700 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 text-sm sm:text-base transition"
-							placeholder="Link zur Stellenanzeige einfügen (z.B. LinkedIn, StepStone)…"
+							placeholder="Deine E-Mail-Adresse…"
 						/>
 					</div>
 					<button
 						type="submit"
-						class="bg-gradient-to-r from-blue-600 via-indigo-600 to-emerald-500 hover:opacity-95 text-white font-bold px-8 py-3.5 rounded-xl shadow-[0_0_25px_rgba(59,130,246,0.3)] transition duration-200 flex items-center justify-center space-x-2 text-sm sm:text-base shrink-0"
+						disabled={status === "sending"}
+						class="bg-gradient-to-r from-blue-600 via-indigo-600 to-emerald-500 hover:opacity-95 disabled:opacity-70 disabled:cursor-wait text-white font-bold px-8 py-3.5 rounded-xl shadow-[0_0_25px_rgba(59,130,246,0.3)] transition duration-200 flex items-center justify-center space-x-2 text-sm sm:text-base shrink-0"
 					>
 						<span>Bewerbung starten</span>
-						<svg
-							class="w-4 h-4"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.5"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
-						>
-							<path d="M5 12h14M13 6l6 6-6 6" />
-						</svg>
+						{#if status === "sending"}
+							<span
+								class="w-4 h-4 rounded-full border-2 border-white/40 border-t-white animate-spin"
+								aria-hidden="true"
+							></span>
+						{:else}
+							<svg
+								class="w-4 h-4"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.5"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								aria-hidden="true"
+							>
+								<path d="M5 12h14M13 6l6 6-6 6" />
+							</svg>
+						{/if}
 					</button>
 				</form>
+
+				{#if status === "error"}
+					<p id="newsletter-error" role="alert" class="text-xs text-red-400 mt-3 px-1">
+						Der Newsletter-Eintrag hat nicht geklappt. Bitte noch einmal versuchen.
+					</p>
+				{/if}
 			</div>
 
-			<p class="text-xs text-gray-500 mt-4">
-				Ohne Link geht es auch — <a href="#editor" class="text-blue-400 hover:text-blue-300 underline">direkt in den Editor</a>.
-				<span class="mx-1">·</span> Lokal gespeichert, keine Kreditkarte, kein Login.
+			<p id="newsletter-note" class="text-xs text-gray-500 mt-4">
+				Mit dem Absenden trittst du dem Newsletter bei. Abmeldung jederzeit möglich.
+			</p>
+			<p class="text-xs text-gray-500 mt-2">
+				Lokal gespeichert, keine Kreditkarte, kein Login.
+				<span class="mx-1">·</span>
+				<a href="#editor" class="text-blue-400 hover:text-blue-300 underline">Direkt in den Editor</a
+				>.
 			</p>
 		</div>
 	</section>
@@ -366,8 +444,10 @@
 			<p class="text-gray-400 text-lg mb-8 max-w-2xl mx-auto">
 				Öffne den Editor, trage deine Stammdaten einmal ein und erstelle deine erste Bewerbung.
 			</p>
-			<a
-				href="#editor"
+			<button
+				type="button"
+				id="cta-bottom"
+				onclick={focusEmail}
 				class="inline-flex items-center space-x-3 bg-gradient-to-r from-blue-600 via-indigo-600 to-emerald-500 text-white font-bold px-8 py-4 rounded-xl shadow-[0_0_25px_rgba(59,130,246,0.3)] text-lg transition transform hover:-translate-y-1"
 			>
 				<span>Jetzt Bewerbung erstellen</span>
@@ -383,7 +463,7 @@
 				>
 					<path d="M5 12h14M13 6l6 6-6 6" />
 				</svg>
-			</a>
+			</button>
 			<p class="text-xs text-gray-500 mt-6">
 				Der Editor merkt sich deinen Stand automatisch — Lesezeichen auf <code
 					class="text-gray-400">#editor</code
