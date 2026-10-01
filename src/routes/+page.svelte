@@ -177,6 +177,10 @@
 	let sendStatus = $state<{ ok: boolean; message: string } | null>(null);
 	let ready = $state(false);
 	let previewCollapsed = $state(false);
+	/** Below `md` the sidebar is an off-canvas drawer instead of a fixed column. */
+	let navOpen = $state(false);
+	/** Below `lg` there is no room for two columns, so only one pane is shown. */
+	let pane = $state<"edit" | "preview">("edit");
 	let backupOpen = $state(false);
 	let stagedBackup = $state<{ name: string; data: WorkspaceDoc } | null>(null);
 	/** Two-step confirm for "reset workspace to placeholder defaults". */
@@ -533,6 +537,7 @@
 	function switchView(v: View) {
 		dlog(`ui switchView ${v}`);
 		view = v;
+		navOpen = false;
 		previewDoc = v === "static" && staticTab === "lebenslauf" ? "cv" : "letter";
 		render();
 	}
@@ -548,6 +553,7 @@
 		dlog(`ui selectJob ${id.slice(-4)}`);
 		activeJobId = id;
 		view = "detail";
+		navOpen = false;
 		logoNote = "";
 		render();
 	}
@@ -1723,7 +1729,7 @@
 </svelte:head>
 
 {#if editorActive}
-	<div class="min-h-screen bg-[#090d16] text-slate-100 flex h-screen overflow-hidden">
+	<div class="bg-[#090d16] text-slate-100 flex h-dvh overflow-hidden">
 	{#snippet fileButton(
 		currentName: string | null,
 		onchange: (files: FileList | null) => void,
@@ -1751,8 +1757,22 @@
 			>
 		</div>
 	{/snippet}
-	<!-- Sidebar -->
-	<aside class="w-60 bg-[#0e1422] border-r border-[#1e293b] flex flex-col shrink-0 select-none overflow-hidden">
+	<!-- Backdrop for the mobile drawer; only exists while the drawer is open. -->
+	{#if navOpen}
+		<div
+			id="nav-backdrop"
+			class="fixed inset-0 z-30 bg-black/60 md:hidden"
+			onclick={() => (navOpen = false)}
+			aria-hidden="true"
+		></div>
+	{/if}
+
+	<!-- Sidebar: a fixed column from `md` up, an off-canvas drawer below. -->
+	<aside
+		class="fixed inset-y-0 left-0 z-40 w-60 bg-[#0e1422] border-r border-[#1e293b] flex flex-col shrink-0 select-none overflow-hidden transition-transform duration-200 md:static md:z-auto md:translate-x-0 md:transition-none {navOpen
+			? 'translate-x-0 shadow-2xl md:shadow-none'
+			: '-translate-x-full'}"
+	>
 		<div class="flex flex-col flex-1 min-h-0">
 			<a
 				href="#start"
@@ -1871,11 +1891,30 @@
 	</aside>
 
 	<!-- Main -->
-	<main class="flex-1 flex flex-col h-screen overflow-hidden">
+	<main class="flex-1 flex flex-col h-dvh overflow-hidden">
 		<header
-			class="h-14 px-6 border-b border-[#1e293b] flex items-center justify-between shrink-0 bg-[#090d16]/80 z-10"
+			class="h-14 px-3 md:px-6 border-b border-[#1e293b] flex items-center gap-2 justify-between shrink-0 bg-[#090d16]/80 z-10"
 		>
-			<div class="text-xs font-mono text-slate-400 flex items-center space-x-1.5">
+			<!-- Opens the drawer; from `md` up the sidebar is always visible. -->
+			<button
+				id="nav-toggle"
+				onclick={() => (navOpen = true)}
+				class="-ml-1 p-1.5 rounded text-slate-300 hover:bg-slate-800 shrink-0 md:hidden"
+				aria-label="Navigation öffnen"
+			>
+				<svg
+					class="w-5 h-5"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					aria-hidden="true"
+				>
+					<path d="M3 6h18M3 12h18M3 18h18" />
+				</svg>
+			</button>
+			<div class="text-xs font-mono text-slate-400 flex items-center space-x-1.5 min-w-0 flex-1">
 				{#if view === "dashboard"}
 					<span class="text-slate-200 font-semibold">Bewerbungen</span>
 				{:else if view === "detail"}
@@ -1883,15 +1922,16 @@
 						>Bewerbungen</button
 					>
 					<span>/</span>
-					<span class="text-slate-200 font-semibold">{activeJob.firma || "Neue Firma"}</span>
+					<span class="text-slate-200 font-semibold truncate">{activeJob.firma || "Neue Firma"}</span>
 				{:else}
 					<span class="text-slate-200 font-semibold">Statische Daten</span>
 				{/if}
 			</div>
-			<div class="flex gap-2">
+			<div class="flex gap-2 shrink-0">
 				<button
+					id="btn-collapse"
 					onclick={() => (previewCollapsed = !previewCollapsed)}
-					class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium py-1.5 px-3 rounded transition-colors"
+					class="hidden lg:inline-block bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium py-1.5 px-3 rounded transition-colors"
 				>
 					{previewCollapsed ? "Vorschau einblenden" : "Vorschau ausblenden"}
 				</button>
@@ -1906,12 +1946,41 @@
 			</div>
 		</header>
 
+		<!-- Below `lg` two columns do not fit, so the panes become tabs
+		     and only the active one is rendered. -->
+		<div id="pane-switch" class="lg:hidden shrink-0 border-b border-[#1e293b] bg-[#0e1422] px-3 py-2">
+			<div class="flex gap-1 rounded-lg border border-[#1e293b] bg-[#0a0f1d] p-1">
+				<button
+					onclick={() => (pane = "edit")}
+					class="flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-colors {pane === 'edit'
+						? 'bg-blue-600 text-white shadow'
+						: 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'}"
+				>
+					Bearbeiten
+				</button>
+				<button
+					onclick={() => {
+						previewCollapsed = false;
+						pane = "preview";
+					}}
+					class="flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-colors {pane === 'preview'
+						? 'bg-blue-600 text-white shadow'
+						: 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'}"
+				>
+					Vorschau
+				</button>
+			</div>
+		</div>
+
 		<div class="flex-1 flex flex-col lg:flex-row overflow-hidden">
 			<!-- Editor -->
-			<div class="flex-1 overflow-y-auto p-6 min-h-0">
+			<div
+				id="editor-pane"
+				class="flex-1 overflow-y-auto p-3 sm:p-6 min-h-0 {pane === 'preview' ? 'hidden lg:block' : ''}"
+			>
 				{#if view === "dashboard"}
 					<div id="job-dashboard" class="space-y-4 max-w-5xl">
-						<div class="flex items-center justify-between">
+						<div class="flex flex-wrap items-center justify-between gap-2">
 							<h2 class="text-xs font-bold text-slate-400 uppercase tracking-wider">
 								Aktive Bewerbungen
 							</h2>
@@ -1923,8 +1992,8 @@
 							</button>
 						</div>
 
-						<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg overflow-hidden">
-							<table class="w-full text-left border-collapse">
+						<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg overflow-x-auto lg:overflow-hidden scroll-dark">
+							<table class="w-full min-w-[720px] lg:min-w-0 text-left border-collapse">
 								<thead>
 									<tr
 										class="border-b border-[#1e293b] text-[10px] font-semibold text-slate-400 uppercase bg-slate-900/40"
@@ -2006,14 +2075,14 @@
 					</div>
 				{:else if view === "detail"}
 					<div id="job-detail" class="space-y-4 max-w-5xl mx-auto">
-						<div class="flex items-center justify-between bg-[#131b2e] border border-[#1e293b] rounded-lg p-3">
+						<div class="flex flex-wrap items-center justify-between gap-2 bg-[#131b2e] border border-[#1e293b] rounded-lg p-3">
 							<button
 								onclick={() => switchView("dashboard")}
 								class="text-xs text-blue-400 hover:text-blue-300 font-semibold"
 							>
 								← Zurück zur Übersicht
 							</button>
-							<div class="flex items-center space-x-2.5">
+							<div class="flex flex-wrap items-center gap-2">
 								<button
 									onclick={() => void copyApplicationJson()}
 									title="Diese Bewerbung als JSON in die Zwischenablage kopieren — selbstbeschreibend, ohne Bilddaten. Zum Einfügen in einen Prompt."
@@ -2386,7 +2455,9 @@
 						</div>
 					</div>
 				{:else}
-					<nav class="inline-flex gap-1 rounded-lg border border-[#1e293b] bg-[#0e1422] p-1 max-w-5xl">
+					<nav
+						class="inline-flex max-w-full gap-1 rounded-lg border border-[#1e293b] bg-[#0e1422] p-1 overflow-x-auto scroll-dark"
+					>
 						{#each staticTabs as t (t.id)}
 							<button
 								onclick={() => {
@@ -2394,7 +2465,7 @@
 									previewDoc = t.id === "lebenslauf" ? "cv" : "letter";
 									render();
 								}}
-								class="px-4 py-1.5 rounded-md text-xs font-medium transition-colors {staticTab === t.id
+								class="px-4 py-1.5 rounded-md text-xs font-medium whitespace-nowrap shrink-0 transition-colors {staticTab === t.id
 									? 'bg-blue-600 text-white shadow'
 									: 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'}"
 							>
@@ -2828,7 +2899,10 @@
 
 			<!-- Preview -->
 			{#if !previewCollapsed}
-			<div class="lg:w-[46%] shrink-0 bg-[#060a12] overflow-y-auto p-6 min-h-0 border-t lg:border-t-0 lg:border-l border-[#1e293b]">
+			<div
+				id="preview-pane"
+				class="lg:w-[46%] shrink-0 bg-[#060a12] overflow-y-auto p-3 sm:p-6 min-h-0 border-t lg:border-t-0 lg:border-l border-[#1e293b] {pane === 'edit' ? 'hidden lg:block' : 'flex-1 lg:flex-none'}"
+			>
 				<div class="flex justify-center mb-1">
 					<div class="inline-flex gap-1 rounded-lg border border-[#1e293b] bg-[#0e1422] p-1">
 						<button
@@ -2866,7 +2940,7 @@
 					<pre
 						class="text-xs text-red-400 bg-red-950/40 border border-red-900 rounded p-4 whitespace-pre-wrap">{error}</pre>
 				{:else if previewDoc === "mail"}
-					<div class="bg-white text-neutral-900 rounded shadow-lg w-full max-w-[820px] mx-auto p-6 text-sm space-y-3">
+					<div class="bg-white text-neutral-900 rounded shadow-lg w-full max-w-[820px] mx-auto p-4 sm:p-6 text-sm space-y-3">
 						<div class="text-xs text-neutral-500">
 							An: <span class="text-neutral-900 font-medium">{activeJob.email || "—"}</span>
 						</div>
@@ -2976,7 +3050,7 @@
 
 	{#if debugOn}
 		<div
-			class="fixed bottom-3 right-3 z-50 w-[24rem] max-h-60 flex flex-col bg-black/90 border border-amber-500/40 rounded p-2 font-mono text-[10px] text-slate-300"
+			class="fixed bottom-3 right-3 z-50 w-[calc(100vw-1.5rem)] max-w-[24rem] max-h-60 flex flex-col bg-black/90 border border-amber-500/40 rounded p-2 font-mono text-[10px] text-slate-300"
 		>
 			<div class="flex justify-between items-center mb-1 shrink-0">
 				<span>Debug · renders: {renderCount}</span>
@@ -2994,8 +3068,8 @@
 	{/if}
 
 	{#if colorPickerOpen}
-		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3">
-			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg w-full max-w-xs p-4 space-y-3">
+		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3 overflow-y-auto">
+			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg w-full max-w-xs p-4 space-y-3 max-h-[90dvh] overflow-y-auto">
 				<div class="flex items-center justify-between">
 					<h3 class="text-xs font-bold text-slate-100">Akzentfarbe</h3>
 					<button
@@ -3011,8 +3085,8 @@
 	{/if}
 
 	{#if logoUrlOpen}
-		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3">
-			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-md w-full p-4 space-y-3">
+		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3 overflow-y-auto">
+			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-md w-full p-4 space-y-3 max-h-[90dvh] overflow-y-auto">
 				<h3 class="text-xs font-bold text-slate-100">Logo von URL laden</h3>
 				<p class="text-[11px] text-slate-400">
 					Die App lädt das Bild von dieser Adresse und übernimmt es als Firmenlogo. Im
@@ -3047,8 +3121,8 @@
 	{/if}
 
 	{#if jsonHintOpen}
-		<div id="json-hint" class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3">
-			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-lg w-full p-5 space-y-4">
+		<div id="json-hint" class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3 overflow-y-auto">
+			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-lg w-full p-5 space-y-4 max-h-[90dvh] overflow-y-auto">
 				<div class="flex items-start gap-3">
 					<!-- Inline SVG, not `material-symbols-outlined`: that font is a
 					     subset carrying only content_copy + check, so any other name
@@ -3131,8 +3205,8 @@
 	{/if}
 
 	{#if backupOpen}
-		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3">
-			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-sm w-full p-4 space-y-3">
+		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3 overflow-y-auto">
+			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-sm w-full p-4 space-y-3 max-h-[90dvh] overflow-y-auto">
 				<h3 class="text-xs font-bold text-slate-100">Arbeitsbereich (JSON, inkl. Bilder)</h3>
 				<p class="text-[11px] text-slate-400">
 					Alles außer generierten PDFs/EMLs: Bewerbungen, Stammdaten, Lebenslauf,
