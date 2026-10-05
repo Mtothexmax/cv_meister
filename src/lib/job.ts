@@ -4,6 +4,7 @@
  * content itself and the shared Stammdaten stay global across jobs.
  */
 
+import type { CvData } from "./cv.js";
 import { DEFAULT_LETTER, type LetterData } from "./letter.js";
 
 export type JobStatus = "Entwurf" | "In Bearbeitung" | "Verschickt";
@@ -62,6 +63,26 @@ export interface JobData {
 	/** Work-sample ids excluded from this job's letter. */
 	hiddenSampleIds: string[];
 
+	/**
+	 * A CV that belongs to this application alone. `null` means "none yet";
+	 * turning the switch on seeds it with a copy of the global CV, so nobody
+	 * starts from an empty page.
+	 *
+	 * Kept when the switch is turned off again — an accidental click must not
+	 * destroy the work. `ownCvEnabled` alone decides which CV is rendered.
+	 */
+	ownCv: CvData | null;
+	/**
+	 * Render `ownCv` for this application instead of the global CV.
+	 *
+	 * A CV is the one document that genuinely differs between applications
+	 * (different emphasis, different order, a different summary line), so the
+	 * option has to exist per application — but it must stay optional, because
+	 * maintaining a second full CV for every application is exactly the work
+	 * this tool is meant to avoid.
+	 */
+	ownCvEnabled: boolean;
+
 	/** This job's cover-letter instance. */
 	letter: LetterData;
 }
@@ -91,6 +112,8 @@ export function createJob(partial: Partial<JobData> = {}): JobData {
 		compressImages: true,
 		hiddenSkillValues: [],
 		hiddenSampleIds: [],
+		ownCv: null,
+		ownCvEnabled: false,
 		letter: structuredClone(DEFAULT_LETTER),
 		...partial,
 	};

@@ -143,6 +143,21 @@ export interface SkillEntryRef {
 	wert: string;
 }
 
+/**
+ * A CV that belongs to one application alone.
+ *
+ * Written on every application node so a round-trip through the file can never
+ * silently drop it. `aktiv` decides which CV the application renders; while it
+ * is false the global CV applies and `lebenslauf` is only a parked copy — the
+ * app keeps an edited own CV around when the switch is turned off again, so
+ * re-enabling it does not start from scratch.
+ */
+export interface OwnCvNode {
+	hinweis: string;
+	aktiv: JsonField<boolean>;
+	lebenslauf: CvNode | null;
+}
+
 /** Everything an application needs, minus the per-job filter. */
 export interface ApplicationNode {
 	felder: {
@@ -185,6 +200,11 @@ export interface ApplicationNode {
 		verfuegbareArbeitsproben: JsonField<string[]>;
 		verfuegbareWerte: JsonField<SkillEntryRef[]>;
 	};
+	/**
+	 * The application's own CV, if it has one. Everything above (`auswahl`)
+	 * refers to whichever CV this block selects.
+	 */
+	eigenerLebenslauf: OwnCvNode;
 }
 
 /**
@@ -346,6 +366,10 @@ const ANLEITUNG_APP_TAIL = [
 	"Absichtlich NICHT enthalten sind Lebenslauf und Arbeitsproben selbst — die sind global (Stammdaten)",
 	"und schon vollständig. Aus ihnen steht hier nur der Schaltzustand (bewerbung.auswahl) samt der Menüs",
 	"der abschaltbaren Einträge.",
+	"EINE AUSNAHME: Hat diese Bewerbung einen eigenen Lebenslauf (bewerbung.eigenerLebenslauf.aktiv = true),",
+	"steht er vollständig unter bewerbung.eigenerLebenslauf.lebenslauf. Er gehört nur zu dieser Bewerbung und",
+	"wird beim Import aus diesem Feld übernommen; bewerbung.auswahl bezieht sich dann auf ihn. Fehlt der",
+	"Abschnitt ganz, bleibt ein in der App vorhandener eigener Lebenslauf unangetastet.",
 	"Bilder sind nicht als Base64 enthalten, sondern nur als Referenz (Name/Vorhanden). Einzige Ausnahme: das Firmenlogo —",
 	"es steht als URL in firmenlogo.value.url und kann dort gesetzt werden; die App lädt das Bild dann von dieser URL.",
 	"Beim Import werden die Felder, das Anschreiben, die Auswahl und die Stammdaten übernommen. Lebenslauf, Arbeitsproben",
@@ -357,6 +381,7 @@ const ANLEITUNG_WORKSPACE_TAIL = [
 	"Das ist der vollständige Arbeitsbereich (Sicherung), nicht die Vorlage für eine einzelne Bewerbung.",
 	'Bilder und Dokumente liegen als data:-URL (Base64) unter "bilder", arbeitsproben[].bild.base64 und dokumente[].base64.',
 	"Zuordnungen laufen über die Indizes in bewerbungen[] und die sichtbaren Namen — es gibt keine IDs.",
+	"Jede Bewerbung kann einen eigenen Lebenslauf haben (bewerbungen[].eigenerLebenslauf); ist er dort nicht aktiv, gilt der globale Lebenslauf oben.",
 ];
 
 export interface ApplicationInput {
@@ -566,6 +591,20 @@ export const AUSWAHL_HINWEIS =
 	+ "Information und werden beim Import ignoriert.";
 
 /**
+ * What an application's own CV is and which switch selects it.
+ *
+ * It has to say outright that `auswahl` refers to whichever CV `aktiv` picks:
+ * the two blocks sit next to each other and a reader would otherwise take the
+ * skill list for the global CV's.
+ */
+export const OWN_CV_HINWEIS =
+	"Ein eigener Lebenslauf gehört nur zu DIESER Bewerbung. Ist aktiv true, wird er statt des globalen "
+	+ "Lebenslaufs gerendert, und der Abschnitt auswahl (fuehrerschein, ausgeschalteteWerte) bezieht "
+	+ "sich auf ihn — verfuegbareWerte listet dann seine umschaltbaren Einträge. Ist aktiv false, gilt "
+	+ "der globale Lebenslauf aus den Stammdaten; ein hier trotzdem vorhandener Lebenslauf ist nur eine "
+	+ "gespeicherte Kopie und wird nicht verwendet.";
+
+/**
  * Hint for the mail text. Shared between the JSON and the UI so the two cannot
  * drift apart.
  *
@@ -657,7 +696,7 @@ function applicationNode(input: ApplicationInput, withImages = false) {
 			fuehrerschein: field(
 				"Führerschein anzeigen",
 				job.fuehrerschein,
-				"Blendet den Führerschein aus dem globalen Lebenslauf in dieser Bewerbung ein oder aus.",
+				"Blendet den Führerschein in dieser Bewerbung ein oder aus — aus dem Lebenslauf, den eigenerLebenslauf.aktiv auswählt (eigener oder globaler).",
 			),
 			bilderKomprimieren: field(
 				"Bilder komprimieren",
@@ -685,6 +724,27 @@ function applicationNode(input: ApplicationInput, withImages = false) {
 				"Nur diese Einträge lassen sich abschalten — alles andere steht immer im Lebenslauf. Ist eine Kategorie hier mit allen ihren Zeilen vertreten, verschwindet sie ganz, sobald alle abgeschaltet sind.",
 			),
 		},
+		eigenerLebenslauf: ownCvNode(job),
+	};
+}
+
+/**
+ * The application's own CV as a self-describing block.
+ *
+ * The CV content is written whenever one exists — also while the switch is off,
+ * so a workspace backup stays lossless. An application that never had one
+ * carries only the switch plus `null`, which keeps the per-application export a
+ * lean fill-in template.
+ */
+function ownCvNode(job: JobData): OwnCvNode {
+	return {
+		hinweis: OWN_CV_HINWEIS,
+		aktiv: field(
+			"Komplett eigener Lebenslauf für diese Bewerbung",
+			job.ownCvEnabled,
+			"true = diese Bewerbung rendert den Lebenslauf unten statt des globalen. false = es gilt der globale Lebenslauf aus den Stammdaten; ein hier trotzdem vorhandener Lebenslauf ist nur eine gespeicherte Kopie und wird nicht verwendet.",
+		),
+		lebenslauf: job.ownCv ? cvNode(job.ownCv) : null,
 	};
 }
 
@@ -769,8 +829,13 @@ export function buildWorkspaceJson(
 	};
 }
 
-/** Only the CV, in the same language as the other exports. */
-export function buildCvJson(cv: CvData): CvDoc {
+/**
+ * Only the CV, in the same language as the other exports.
+ *
+ * `scope` changes nothing but the instructions: an application's own CV is the
+ * very same document, and that is what lets one be copied to the other.
+ */
+export function buildCvJson(cv: CvData, scope: "global" | "bewerbung" = "global"): CvDoc {
 	return {
 		format: JSON_FORMAT,
 		version: JSON_VERSION,
@@ -778,7 +843,9 @@ export function buildCvJson(cv: CvData): CvDoc {
 		exportiert: new Date().toISOString(),
 		anleitung: [
 			...ANLEITUNG_HEAD,
-			"Nur der Lebenslauf (global, gilt für alle Bewerbungen). Was pro Bewerbung ein-/ausgeschaltet ist, steht im Bewerbungs-Export unter bewerbung.auswahl.",
+			scope === "bewerbung"
+				? "Nur der Lebenslauf DIESER Bewerbung (eigener Lebenslauf). Er gilt nur hier und steht im Bewerbungs-Export unter bewerbung.eigenerLebenslauf; der globale Lebenslauf bleibt unverändert. Dasselbe Dokument lässt sich auch als globaler Lebenslauf importieren."
+				: "Nur der Lebenslauf (global, gilt für alle Bewerbungen ohne eigenen). Was pro Bewerbung ein-/ausgeschaltet ist, steht im Bewerbungs-Export unter bewerbung.auswahl.",
 		],
 		lebenslauf: cvNode(cv),
 	};
@@ -968,6 +1035,20 @@ export function readApplicationNode(node: unknown, fallbackJobId: string): Parse
 		// not an unknown.
 		compressImages: readBool(auswahl.bilderKomprimieren, true),
 	};
+
+	// The application's own CV. Only touched when the file actually carries the
+	// block — a file written before the feature existed, or a prompt answer that
+	// dropped the block, must not silently delete a CV the app still has.
+	const own = n.eigenerLebenslauf;
+	if (own && typeof own === "object") {
+		const o = own as Record<string, unknown>;
+		const aktiv = readBool(o.aktiv, false);
+		const ownCv = readCvNode(o.lebenslauf);
+		job.ownCv = ownCv;
+		// "on" without a readable CV behind it would render an empty tab, so it
+		// falls back to the global CV instead.
+		job.ownCvEnabled = aktiv && ownCv !== null;
+	}
 
 	// Both the current and the legacy key names are read, and `unwrap` accepts
 	// both shapes: a bare array (version 2 and the first version-3 exports) and

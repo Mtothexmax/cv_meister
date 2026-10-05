@@ -61,6 +61,11 @@
 
 	type View = "dashboard" | "detail" | "static";
 	type StaticTab = "stammdaten" | "lebenslauf" | "erfahrung" | "proben" | "pdf";
+	/**
+	 * The two panes of an application that has its own CV. The switcher is only
+	 * rendered while `ownCvEnabled` — without one there is nothing to switch to.
+	 */
+	type DetailTab = "bewerbung" | "lebenslauf";
 
 	const staticTabs: { id: StaticTab; label: string }[] = [
 		{ id: "stammdaten", label: "Stammdaten" },
@@ -83,16 +88,29 @@
 	let shared = $state<SharedData>(structuredClone(DEFAULT_SHARED));
 	let jobs = $state<JobData[]>(structuredClone(DEFAULT_JOBS));
 	let cv = $state<CvData>(normalizeCv(structuredClone(DEFAULT_CV)));
-	/** Only categories marked as switchable appear in a job's CV filter. */
-	/** Only entries inside a marked category appear in a job's CV filter. */
-	let filterSkillEntries = $derived(toggleableEntries(cv));
 	let samples = $state<WorkSample[]>(structuredClone(DEFAULT_SAMPLES));
 	/** Extra PDFs attached to every application (Statische Daten → PDF). */
 	let documents = $state<ExtraDocument[]>(structuredClone(DEFAULT_DOCUMENTS));
 	let staticData = $state<StaticData>(structuredClone(DEFAULT_STATIC));
 	let staticTab = $state<StaticTab>("stammdaten");
+	let detailTab = $state<DetailTab>("bewerbung");
 	let activeJobId = $state<string>("");
 	let activeJob = $derived(jobs.find((j) => j.id === activeJobId) ?? jobs[0]);
+
+	/**
+	 * The CV an application renders.
+	 *
+	 * One resolver for every caller — preview, both PDFs, JSON export and the
+	 * filter list. Anything reaching for the global `cv` directly would quietly
+	 * render the wrong document for an application that has its own.
+	 */
+	function cvFor(job: JobData): CvData {
+		return job.ownCvEnabled && job.ownCv ? job.ownCv : cv;
+	}
+
+	/** Only entries inside a category marked as switchable appear in the filter. */
+	let filterSkillEntries = $derived(toggleableEntries(cvFor(activeJob)));
+
 	let photoFile = $state<File | null>(null);
 	/** Signature image (global, from Stammdaten). */
 	let signatureFile = $state<File | null>(null);
@@ -210,7 +228,14 @@
 	let coverTimer: ReturnType<typeof setTimeout> | undefined;
 	let mailPromptCopied = $state(false);
 	let mailPromptTimer: ReturnType<typeof setTimeout> | undefined;
-	let cvCopied = $state(false);
+	/**
+	 * Which CV editor last copied, not merely *that* one did.
+	 *
+	 * Both editors are on screen at different times but share this state, so a
+	 * plain boolean made the other one's button read "✓ Kopiert!" for 1.5 s after
+	 * a view change — it claimed a copy that never happened there.
+	 */
+	let cvCopied = $state<"global" | "bewerbung" | null>(null);
 	let cvCopyTimer: ReturnType<typeof setTimeout> | undefined;
 	let cvImportError = $state("");
 	let logoNote = $state("");
@@ -338,7 +363,7 @@
 			const jf = jobFiles[job.id];
 			const result =
 				previewDoc === "cv"
-					? await compileCv(shared, job, cv, photoFile)
+					? await compileCv(shared, job, cvFor(job), photoFile)
 					: await compileLetter(
 							shared,
 							job,
@@ -490,6 +515,15 @@
 					// Absent in state saved before the switch existed: "on" is the
 					// intended default, not an unknown.
 					if (typeof j.compressImages !== "boolean") j.compressImages = true;
+					// Both absent in state saved before the per-application CV existed.
+					// A switch without a CV behind it would render nothing, so it is
+					// forced off in that case rather than left dangling.
+					if (typeof j.ownCvEnabled !== "boolean") j.ownCvEnabled = false;
+					if (j.ownCv && typeof j.ownCv === "object") j.ownCv = normalizeCv(j.ownCv as CvData);
+					else {
+						j.ownCv = null;
+						j.ownCvEnabled = false;
+					}
 				}
 			}
 			if (s.cv && typeof s.cv === "object") cv = normalizeCv(s.cv as CvData);
@@ -555,6 +589,10 @@
 		view = "detail";
 		navOpen = false;
 		logoNote = "";
+		// Always land on the application's own fields: the CV tab of the previous
+		// application is not where anyone expects to arrive.
+		if (detailTab === "lebenslauf") previewDoc = "letter";
+		detailTab = "bewerbung";
 		render();
 	}
 
@@ -645,7 +683,8 @@
 		const input: ApplicationInput = {
 			job,
 			shared,
-			cv,
+			// The CV this application actually renders — its own one when set.
+			cv: cvFor(job),
 			samples,
 			documents,
 			logoUrl: files?.logoUrl ?? null,
@@ -752,7 +791,9 @@
 		if (parsed.shared) shared = parsed.shared;
 
 		Object.assign(job, { ...job, ...parsed.job, id: job.id, letter: parsed.letter });
-		applyFilters(job, cv, samples, parsed);
+		// Resolved after the merge: the file may just have switched this
+		// application over to its own CV, and the filter belongs to that one.
+		applyFilters(job, cvFor(job), samples, parsed);
 
 		filesFor(job.id).logoUrl = parsed.logoUrl;
 		if (parsed.logoUrl) {
@@ -922,13 +963,21 @@
 		}
 	}
 
-	async function copyCvJson() {
+	/**
+	 * Which CV the JSON buttons act on: the global one, or the active
+	 * application's own. Both write the identical "lebenslauf" document — only
+	 * the target differs, so the same file can be moved between the two.
+	 */
+	type CvScope = "global" | "bewerbung";
+
+	async function copyCvJson(scope: CvScope = "global") {
 		try {
-			const payload = JSON.stringify(buildCvJson($state.snapshot(cv)), null, 2);
+			const target = scope === "bewerbung" ? cvFor(activeJob) : cv;
+			const payload = JSON.stringify(buildCvJson($state.snapshot(target), scope), null, 2);
 			await navigator.clipboard.writeText(payload);
-			cvCopied = true;
+			cvCopied = scope;
 			clearTimeout(cvCopyTimer);
-			cvCopyTimer = setTimeout(() => (cvCopied = false), 1500);
+			cvCopyTimer = setTimeout(() => (cvCopied = null), 1500);
 		} catch {
 			error = "Kopieren fehlgeschlagen (Clipboard blockiert).";
 		}
@@ -938,11 +987,14 @@
 	 * Reads a CV JSON from the clipboard — the counterpart to "JSON kopieren".
 	 *
 	 * No file picker: the workflow is copy → paste into a prompt → paste the
-	 * answer back. The new CV gets fresh section/group ids, so every job's
-	 * switch state has to be re-resolved by text, or it would silently stop
-	 * matching.
+	 * answer back. The new CV gets fresh section/group ids, so the switch state
+	 * of every affected application has to be re-resolved by text, or it would
+	 * silently stop matching.
+	 *
+	 * `scope` decides what is replaced: the global CV, or only this
+	 * application's own one.
 	 */
-	async function importCvJson(): Promise<void> {
+	async function importCvJson(scope: CvScope = "global"): Promise<void> {
 		cvImportError = "";
 		try {
 			const doc = await parseClipboardJson("Lebenslauf");
@@ -951,8 +1003,23 @@
 			}
 			const next = readCvJson(doc);
 			if (!next) throw new Error("Fehlendes Feld: abschnitte");
+
+			if (scope === "bewerbung") {
+				const job = activeJob;
+				const saved = filterAsText(job, cvFor(job), samples);
+				job.ownCv = next;
+				job.ownCvEnabled = true;
+				applyFilters(job, job.ownCv, samples, saved);
+				scheduleRender();
+				return;
+			}
+
+			// Only applications that actually use the global CV are re-resolved:
+			// the others keep their own, which this file never mentioned.
 			const filtersByJob = new Map(
-				jobs.map((j) => [j.id, filterAsText(j, cv, samples)] as const),
+				jobs
+					.filter((j) => !j.ownCvEnabled)
+					.map((j) => [j.id, filterAsText(j, cv, samples)] as const),
 			);
 			cv = next;
 			for (const j of jobs) {
@@ -996,7 +1063,7 @@
 		busy = key;
 		error = "";
 		try {
-			const pdf = await compileCvPdf(shared, job, cv, photoFile);
+			const pdf = await compileCvPdf(shared, job, cvFor(job), photoFile);
 			downloadBlob(pdf, docFilename("Lebenslauf", job));
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -1017,7 +1084,7 @@
 			assets,
 			staticData.samplesDisclaimer,
 		);
-		const cvPdf = await compileCvPdf(shared, job, cv, photoFile);
+		const cvPdf = await compileCvPdf(shared, job, cvFor(job), photoFile);
 		return { letterPdf, cvPdf };
 	}
 
@@ -1118,7 +1185,7 @@
 				staticData.samplesDisclaimer,
 			);
 		}
-		if (kind === "cv") return compileCvPdf(shared, job, cv, photoFile);
+		if (kind === "cv") return compileCvPdf(shared, job, cvFor(job), photoFile);
 		return readDocumentBytes(docIdOf(kind));
 	}
 
@@ -1332,10 +1399,11 @@
 		);
 
 		// The switch state travels as text, so it can be applied straight onto
-		// the new CV and the new sample pool.
+		// the new CV and the new sample pool. Each application is resolved
+		// against the CV it actually uses — its own one where the file had one.
 		p.jobs.forEach((parsed, i) => {
 			const job = jobs[i];
-			if (job) applyFilters(job, cv, samples, parsed);
+			if (job) applyFilters(job, cvFor(job), samples, parsed);
 		});
 
 		documents = p.documents;
@@ -1400,6 +1468,7 @@
 		activeJobId = jobs[0]?.id ?? "";
 		view = "dashboard";
 		staticTab = "stammdaten";
+		detailTab = "bewerbung";
 		photoFile = null;
 		signatureFile = null;
 		sampleFiles = {};
@@ -1568,7 +1637,11 @@
 		return !!id && !!documentFiles[id];
 	}
 
-	// --- CV helpers (global CV, per-job filter) ---
+	// --- CV helpers ---
+	// One editor serves two targets: the global CV (Statische Daten → Lebenslauf)
+	// and an application's own one (Bewerbung → Reiter „Lebenslauf"). Every
+	// mutating helper therefore takes the CV to edit instead of reaching for the
+	// global one — the two must never bleed into each other.
 
 	function move<T>(arr: T[], i: number, dir: -1 | 1) {
 		const j = i + dir;
@@ -1576,29 +1649,64 @@
 		[arr[i], arr[j]] = [arr[j], arr[i]];
 	}
 
-	function addSection() {
-		cv.sections.push({ id: nid(), title: "Neuer Abschnitt", entries: [], skills: [] });
+	function addSection(target: CvData) {
+		target.sections.push({ id: nid(), title: "Neuer Abschnitt", entries: [], skills: [] });
 	}
 
-	function removeSection(i: number) {
-		cv.sections.splice(i, 1);
+	function removeSection(target: CvData, i: number) {
+		target.sections.splice(i, 1);
 		scheduleRender();
 	}
 
-	function addEntry(si: number) {
-		cv.sections[si].entries.push({ title: "", location: "", date: "", description: "", details: "" });
+	function addEntry(target: CvData, si: number) {
+		target.sections[si].entries.push({
+			title: "",
+			location: "",
+			date: "",
+			description: "",
+			details: "",
+		});
 	}
 
-	function removeEntry(si: number, ei: number) {
-		cv.sections[si].entries.splice(ei, 1);
+	function removeEntry(target: CvData, si: number, ei: number) {
+		target.sections[si].entries.splice(ei, 1);
 	}
 
-	function addSkill(si: number) {
-		cv.sections[si].skills.push({ id: nid(), category: "", values: "", toggleable: false });
+	function addSkill(target: CvData, si: number) {
+		target.sections[si].skills.push({ id: nid(), category: "", values: "", toggleable: false });
 	}
 
-	function removeSkill(si: number, gi: number) {
-		cv.sections[si].skills.splice(gi, 1);
+	function removeSkill(target: CvData, si: number, gi: number) {
+		target.sections[si].skills.splice(gi, 1);
+	}
+
+	/**
+	 * Turns the per-application CV on or off.
+	 *
+	 * Turning it on seeds a copy of the global CV (with its ids, so the existing
+	 * filter keys keep matching) and jumps straight to the new tab — the switch
+	 * only makes sense if you can edit what it turns on. Turning it off keeps
+	 * the CV around; an accidental click must not throw the work away.
+	 */
+	function toggleOwnCv() {
+		const job = activeJob;
+		if (job.ownCvEnabled) {
+			job.ownCvEnabled = false;
+			detailTab = "bewerbung";
+			previewDoc = "letter";
+		} else {
+			if (!job.ownCv) job.ownCv = normalizeCv($state.snapshot(cv));
+			job.ownCvEnabled = true;
+			selectDetailTab("lebenslauf");
+			return;
+		}
+		render();
+	}
+
+	function selectDetailTab(t: DetailTab) {
+		detailTab = t;
+		previewDoc = t === "lebenslauf" ? "cv" : "letter";
+		render();
 	}
 
 	function toggleSkillValue(key: string) {
@@ -1755,6 +1863,213 @@
 			<span class="text-[10px] text-slate-500 truncate"
 				>{currentName ?? "Keine Datei gewählt"}</span
 			>
+		</div>
+	{/snippet}
+
+	<!--
+		The CV editor. It serves two targets — the global CV (Statische Daten →
+		Lebenslauf) and an application's own one (Bewerbung → Reiter
+		„Lebenslauf") — so it takes the CV to edit rather than reaching for the
+		global one. Both write the identical "lebenslauf" document, which is what
+		lets a CV be moved between the two by copy and paste.
+	-->
+	{#snippet cvEditor(target: CvData, scope: CvScope)}
+		<div class="space-y-4 max-w-5xl">
+			{#if scope === "bewerbung"}
+				<div
+					id="own-cv-note"
+					class="text-[11px] text-amber-200/90 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 leading-relaxed"
+				>
+					Das ist der <strong>eigene Lebenslauf dieser Bewerbung</strong>. Er gilt nur hier — der
+					Lebenslauf aus den Statischen Daten bleibt unverändert.
+				</div>
+			{/if}
+			<!-- Scoped id: the detail view's action bar carries a "JSON kopieren" of
+			     its own (the whole application), so the CV buttons need to be
+			     addressable on their own. -->
+			<div id="cv-json-{scope}" class="flex flex-wrap items-center gap-2">
+				<button
+					onclick={() => void copyCvJson(scope)}
+					title={scope === "bewerbung"
+						? "Eigenen Lebenslauf dieser Bewerbung als JSON kopieren (z. B. für eine KI)"
+						: "Lebenslauf-JSON in die Zwischenablage kopieren (z. B. für eine KI)"}
+					class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium py-1.5 px-3 rounded transition-colors"
+				>
+					{cvCopied === scope ? "✓ Kopiert!" : "JSON kopieren"}
+				</button>
+				<button
+					onclick={() => void importCvJson(scope)}
+					title={scope === "bewerbung"
+						? "Lebenslauf-JSON aus der Zwischenablage einlesen (ersetzt den eigenen Lebenslauf dieser Bewerbung)"
+						: "Lebenslauf-JSON aus der Zwischenablage einlesen (ersetzt den Lebenslauf)"}
+					class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium py-1.5 px-3 rounded transition-colors"
+				>
+					JSON importieren
+				</button>
+				{#if cvImportError}
+					<span class="text-xs text-red-400">{cvImportError}</span>
+				{/if}
+			</div>
+			<div class="{cardCls} space-y-3">
+				<h4 class={hCls}>Kopf</h4>
+				<div class="grid grid-cols-2 gap-3">
+					<div>
+						<span class={labelCls}>Bewerbungsfoto (optional)</span>
+						{@render fileButton(photoFile?.name ?? null, (f) => {
+							photoFile = f?.[0] ?? null;
+							render();
+						})}
+					</div>
+					<div>
+						<span class={labelCls}>Führerschein (z. B. Klasse B)</span>
+						<input bind:value={target.fuehrerschein} class={inputCls} placeholder="Klasse B" />
+					</div>
+				</div>
+			</div>
+
+			{#each target.sections as sec, si (sec.id ?? si)}
+				<div class="{cardCls} space-y-3">
+					<div class="flex items-center gap-2">
+						<input
+							bind:value={sec.title}
+							placeholder="Abschnittstitel"
+							class="{inputCls} font-semibold"
+						/>
+						<button
+							onclick={() => move(target.sections, si, -1)}
+							disabled={si === 0}
+							class="text-xs text-slate-400 hover:underline disabled:opacity-30"
+							title="Nach oben"
+						>
+							↑
+						</button>
+						<button
+							onclick={() => move(target.sections, si, 1)}
+							disabled={si === target.sections.length - 1}
+							class="text-xs text-slate-400 hover:underline disabled:opacity-30"
+							title="Nach unten"
+						>
+							↓
+						</button>
+						<button
+							onclick={() => removeSection(target, si)}
+							class="text-xs text-red-400 hover:underline"
+						>
+							Entfernen
+						</button>
+					</div>
+
+					{#each sec.entries as entry, ei (ei)}
+						<div class="rounded border border-[#1e293b] p-2 flex flex-col gap-2 bg-[#0a0f1d]">
+							<div class="flex items-center justify-between">
+								<span class="text-xs font-semibold text-slate-500">Eintrag {ei + 1}</span>
+								<div class="flex gap-2">
+									<button
+										onclick={() => move(sec.entries, ei, -1)}
+										disabled={ei === 0}
+										class="text-xs text-slate-400 hover:underline disabled:opacity-30"
+									>
+										↑
+									</button>
+									<button
+										onclick={() => move(sec.entries, ei, 1)}
+										disabled={ei === sec.entries.length - 1}
+										class="text-xs text-slate-400 hover:underline disabled:opacity-30"
+									>
+										↓
+									</button>
+									<button
+										onclick={() => removeEntry(target, si, ei)}
+										class="text-xs text-red-400 hover:underline"
+									>
+										Entfernen
+									</button>
+								</div>
+							</div>
+							<div class="grid grid-cols-2 gap-2">
+								<input
+									bind:value={entry.title}
+									placeholder="Titel (z. B. Software-Entwickler)"
+									class={inputCls}
+								/>
+								<input bind:value={entry.location} placeholder="Ort" class={inputCls} />
+								<input
+									bind:value={entry.date}
+									placeholder="Zeitraum (z. B. Juni 2021 - März 2026)"
+									class={inputCls}
+								/>
+								<input
+									bind:value={entry.description}
+									placeholder="Firma / Beschreibung"
+									class={inputCls}
+								/>
+							</div>
+							<textarea
+								bind:value={entry.details}
+								placeholder={"Details (Zeile mit \"- \" = Aufzählung, *Wort* = fett)"}
+								rows="4"
+								class="{inputCls} font-mono"
+							></textarea>
+						</div>
+					{/each}
+
+					{#each sec.skills as group, gi (gi)}
+						<div class="rounded border border-[#1e293b] p-2 flex flex-col gap-2 bg-[#0a0f1d]">
+							<div class="flex items-center justify-between">
+								<span class="text-xs font-semibold text-slate-500">Kenntnisse {gi + 1}</span>
+								<button
+									onclick={() => removeSkill(target, si, gi)}
+									class="text-xs text-red-400 hover:underline"
+								>
+									Entfernen
+								</button>
+							</div>
+							<input
+								bind:value={group.category}
+								placeholder="Kategorie (z. B. Sprachen)"
+								class={inputCls}
+							/>
+							<textarea
+								bind:value={group.values}
+								placeholder={"Ein Wert pro Zeile, *Wert* = fett"}
+								rows="3"
+								class="{inputCls} font-mono"
+							></textarea>
+							<!-- Marks the category as switchable — but what gets switched is
+							     each of its entries on its own, per application. -->
+							<label class="flex items-center gap-2 cursor-pointer">
+								<input
+									type="checkbox"
+									bind:checked={group.toggleable}
+									class="w-3.5 h-3.5 rounded accent-emerald-600 cursor-pointer"
+								/>
+								<span class="text-xs text-slate-300">Einträge pro Bewerbung umschaltbar</span>
+							</label>
+						</div>
+					{/each}
+
+					<div class="flex gap-2">
+						<button
+							onclick={() => addEntry(target, si)}
+							class="flex-1 text-xs font-medium border border-dashed border-[#1e293b] rounded py-1.5 text-slate-400 hover:bg-slate-800/50"
+						>
+							+ Eintrag
+						</button>
+						<button
+							onclick={() => addSkill(target, si)}
+							class="flex-1 text-xs font-medium border border-dashed border-[#1e293b] rounded py-1.5 text-slate-400 hover:bg-slate-800/50"
+						>
+							+ Kenntnisse
+						</button>
+					</div>
+				</div>
+			{/each}
+			<button
+				onclick={() => addSection(target)}
+				class="text-xs font-medium border border-dashed border-[#1e293b] rounded py-2 text-slate-400 hover:bg-slate-800/50 w-full"
+			>
+				+ Abschnitt hinzufügen
+			</button>
 		</div>
 	{/snippet}
 	<!-- Backdrop for the mobile drawer; only exists while the drawer is open. -->
@@ -2124,6 +2439,37 @@
 							</div>
 						</div>
 
+						<!-- Only an application with its own CV has something to switch
+						     between; without one the detail view stays a single pane. -->
+						{#if activeJob.ownCvEnabled}
+							<nav
+								id="detail-tabs"
+								class="inline-flex max-w-full gap-1 rounded-lg border border-[#1e293b] bg-[#0e1422] p-1 overflow-x-auto scroll-dark"
+							>
+								<button
+									onclick={() => selectDetailTab("bewerbung")}
+									class="px-4 py-1.5 rounded-md text-xs font-medium whitespace-nowrap shrink-0 transition-colors {detailTab === 'bewerbung'
+										? 'bg-blue-600 text-white shadow'
+										: 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'}"
+								>
+									Bewerbung
+								</button>
+								<button
+									onclick={() => selectDetailTab("lebenslauf")}
+									class="px-4 py-1.5 rounded-md text-xs font-medium whitespace-nowrap shrink-0 transition-colors {detailTab === 'lebenslauf'
+										? 'bg-blue-600 text-white shadow'
+										: 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'}"
+								>
+									Lebenslauf
+								</button>
+							</nav>
+						{/if}
+
+						{#if activeJob.ownCvEnabled && detailTab === "lebenslauf"}
+							{#if activeJob.ownCv}
+								{@render cvEditor(activeJob.ownCv, "bewerbung")}
+							{/if}
+						{:else}
 						<div class="grid grid-cols-1 md:grid-cols-12 gap-4">
 							<div class="md:col-span-7 space-y-4">
 								<div class="{cardCls} space-y-3">
@@ -2399,6 +2745,36 @@
 								<div class="{cardCls} space-y-4">
 									<h4 class={hCls}>Lebenslauf-Filter (für diese Bewerbung)</h4>
 
+									<!-- The one switch that changes what the rest of this card refers
+									     to: with an own CV the list below filters that one, not the
+									     global Lebenslauf. -->
+									<label
+										id="own-cv-switch"
+										class="bg-[#0a0f1d] p-2.5 rounded border border-[#1e293b] flex items-center justify-between gap-3 cursor-pointer"
+									>
+										<span class="text-xs text-slate-200"
+											>Komplett eigener Lebenslauf für diese Bewerbung</span
+										>
+										<input
+											type="checkbox"
+											checked={activeJob.ownCvEnabled}
+											onchange={toggleOwnCv}
+											class="w-4 h-4 rounded accent-emerald-600 cursor-pointer shrink-0"
+										/>
+									</label>
+									{#if activeJob.ownCvEnabled}
+										<p class="text-[10px] text-slate-500 leading-relaxed">
+											Oben im Reiter „Lebenslauf“ bearbeitest du ihn. Der Lebenslauf aus den
+											Statischen Daten bleibt unverändert, und der Filter unten gilt für diesen
+											eigenen Lebenslauf.
+										</p>
+									{:else}
+										<p class="text-[10px] text-slate-500 leading-relaxed">
+											Aus = es gilt der Lebenslauf aus den Statischen Daten. Anschalten legt eine
+											Kopie davon an, die nur für diese Bewerbung gilt.
+										</p>
+									{/if}
+
 									<label
 										class="bg-[#0a0f1d] p-2.5 rounded border border-[#1e293b] flex items-center justify-between cursor-pointer"
 									>
@@ -2416,8 +2792,9 @@
 										</p>
 										{#if filterSkillEntries.length === 0}
 											<p class="text-xs text-slate-500">
-												Keine Kategorie ist umschaltbar. Das legst du im Lebenslauf unter
-												„Statische Daten“ fest.
+												Keine Kategorie ist umschaltbar. Das legst du {activeJob.ownCvEnabled
+													? "im eigenen Lebenslauf dieser Bewerbung (Reiter „Lebenslauf“)"
+													: "im Lebenslauf unter „Statische Daten“"} fest.
 											</p>
 										{:else}
 											{#each filterSkillEntries as { section, group, values } (group.id ?? group.category)}
@@ -2453,6 +2830,7 @@
 								</div>
 							</div>
 						</div>
+						{/if}
 					</div>
 				{:else}
 					<nav
@@ -2474,197 +2852,7 @@
 						{/each}
 					</nav>
 					{#if staticTab === "lebenslauf"}
-					<div class="space-y-4 max-w-5xl">
-						<div class="flex items-center gap-2">
-							<button
-								onclick={copyCvJson}
-								title="Lebenslauf-JSON in die Zwischenablage kopieren (z. B. für eine KI)"
-								class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium py-1.5 px-3 rounded transition-colors"
-							>
-								{cvCopied ? "✓ Kopiert!" : "JSON kopieren"}
-							</button>
-							<button
-								onclick={() => void importCvJson()}
-								title="Lebenslauf-JSON aus der Zwischenablage einlesen (ersetzt den Lebenslauf)"
-								class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium py-1.5 px-3 rounded transition-colors"
-							>
-								JSON importieren
-							</button>
-							{#if cvImportError}
-								<span class="text-xs text-red-400">{cvImportError}</span>
-							{/if}
-						</div>
-						<div class="{cardCls} space-y-3">
-							<h4 class={hCls}>Kopf</h4>
-							<div class="grid grid-cols-2 gap-3">
-								<div>
-									<span class={labelCls}>Bewerbungsfoto (optional)</span>
-									{@render fileButton(photoFile?.name ?? null, (f) => {
-										photoFile = f?.[0] ?? null;
-										render();
-									})}
-								</div>
-								<div>
-									<span class={labelCls}>Führerschein (z. B. Klasse B)</span>
-									<input
-										bind:value={cv.fuehrerschein}
-										class={inputCls}
-										placeholder="Klasse B"
-									/>
-								</div>
-							</div>
-						</div>
-
-						{#each cv.sections as sec, si (sec.id ?? si)}
-							<div class="{cardCls} space-y-3">
-								<div class="flex items-center gap-2">
-									<input
-										bind:value={sec.title}
-										placeholder="Abschnittstitel"
-										class="{inputCls} font-semibold"
-									/>
-									<button
-										onclick={() => move(cv.sections, si, -1)}
-										disabled={si === 0}
-										class="text-xs text-slate-400 hover:underline disabled:opacity-30"
-										title="Nach oben"
-									>
-										↑
-									</button>
-									<button
-										onclick={() => move(cv.sections, si, 1)}
-										disabled={si === cv.sections.length - 1}
-										class="text-xs text-slate-400 hover:underline disabled:opacity-30"
-										title="Nach unten"
-									>
-										↓
-									</button>
-									<button
-										onclick={() => removeSection(si)}
-										class="text-xs text-red-400 hover:underline"
-									>
-										Entfernen
-									</button>
-								</div>
-
-								{#each sec.entries as entry, ei (ei)}
-									<div
-										class="rounded border border-[#1e293b] p-2 flex flex-col gap-2 bg-[#0a0f1d]"
-									>
-										<div class="flex items-center justify-between">
-											<span class="text-xs font-semibold text-slate-500">Eintrag {ei + 1}</span>
-											<div class="flex gap-2">
-												<button
-													onclick={() => move(sec.entries, ei, -1)}
-													disabled={ei === 0}
-													class="text-xs text-slate-400 hover:underline disabled:opacity-30"
-												>
-													↑
-												</button>
-												<button
-													onclick={() => move(sec.entries, ei, 1)}
-													disabled={ei === sec.entries.length - 1}
-													class="text-xs text-slate-400 hover:underline disabled:opacity-30"
-												>
-													↓
-												</button>
-												<button
-													onclick={() => removeEntry(si, ei)}
-													class="text-xs text-red-400 hover:underline"
-												>
-													Entfernen
-												</button>
-											</div>
-										</div>
-										<div class="grid grid-cols-2 gap-2">
-											<input
-												bind:value={entry.title}
-												placeholder="Titel (z. B. Software-Entwickler)"
-												class={inputCls}
-											/>
-											<input bind:value={entry.location} placeholder="Ort" class={inputCls} />
-											<input
-												bind:value={entry.date}
-												placeholder="Zeitraum (z. B. Juni 2021 - März 2026)"
-												class={inputCls}
-											/>
-											<input
-												bind:value={entry.description}
-												placeholder="Firma / Beschreibung"
-												class={inputCls}
-											/>
-										</div>
-										<textarea
-											bind:value={entry.details}
-											placeholder={"Details (Zeile mit \"- \" = Aufzählung, *Wort* = fett)"}
-											rows="4"
-											class="{inputCls} font-mono"
-										></textarea>
-									</div>
-								{/each}
-
-								{#each sec.skills as group, gi (gi)}
-									<div
-										class="rounded border border-[#1e293b] p-2 flex flex-col gap-2 bg-[#0a0f1d]"
-									>
-										<div class="flex items-center justify-between">
-											<span class="text-xs font-semibold text-slate-500"
-												>Kenntnisse {gi + 1}</span
-											>
-											<button
-												onclick={() => removeSkill(si, gi)}
-												class="text-xs text-red-400 hover:underline"
-											>
-												Entfernen
-											</button>
-										</div>
-										<input
-											bind:value={group.category}
-											placeholder="Kategorie (z. B. Sprachen)"
-											class={inputCls}
-										/>
-										<textarea
-											bind:value={group.values}
-											placeholder={"Ein Wert pro Zeile, *Wert* = fett"}
-											rows="3"
-											class="{inputCls} font-mono"
-										></textarea>
-										<!-- Marks the category as switchable — but what gets switched is
-										     each of its entries on its own, per application. -->
-										<label class="flex items-center gap-2 cursor-pointer">
-											<input
-												type="checkbox"
-												bind:checked={group.toggleable}
-												class="w-3.5 h-3.5 rounded accent-emerald-600 cursor-pointer"
-											/>
-											<span class="text-xs text-slate-300">Einträge pro Bewerbung umschaltbar</span>
-										</label>
-									</div>
-								{/each}
-
-								<div class="flex gap-2">
-									<button
-										onclick={() => addEntry(si)}
-										class="flex-1 text-xs font-medium border border-dashed border-[#1e293b] rounded py-1.5 text-slate-400 hover:bg-slate-800/50"
-									>
-										+ Eintrag
-									</button>
-									<button
-										onclick={() => addSkill(si)}
-										class="flex-1 text-xs font-medium border border-dashed border-[#1e293b] rounded py-1.5 text-slate-400 hover:bg-slate-800/50"
-									>
-										+ Kenntnisse
-									</button>
-								</div>
-							</div>
-						{/each}
-						<button
-							onclick={addSection}
-							class="text-xs font-medium border border-dashed border-[#1e293b] rounded py-2 text-slate-400 hover:bg-slate-800/50 w-full"
-						>
-							+ Abschnitt hinzufügen
-						</button>
-					</div>
+					{@render cvEditor(cv, "global")}
 				{:else if staticTab === "proben"}
 					<div class="space-y-4 max-w-5xl">
 						<div class="{cardCls} space-y-2">
@@ -2933,7 +3121,7 @@
 						</button>
 					</div>
 				</div>
-				<p class="text-center text-[10px] text-slate-500 h-4 mb-3">
+				<p id="preview-status" class="text-center text-[10px] text-slate-500 h-4 mb-3">
 					{rendering ? "Rendert…" : "Bereit"}
 				</p>
 				{#if error}
@@ -3205,8 +3393,14 @@
 	{/if}
 
 	{#if backupOpen}
-		<div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3 overflow-y-auto">
-			<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-sm w-full p-4 space-y-3 max-h-[90dvh] overflow-y-auto">
+		<div
+			id="backup-dialog"
+			class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3 overflow-y-auto"
+		>
+			<div
+				id="backup-panel"
+				class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-sm w-full p-4 space-y-3 max-h-[90dvh] overflow-y-auto"
+			>
 				<h3 class="text-xs font-bold text-slate-100">Arbeitsbereich (JSON, inkl. Bilder)</h3>
 				<p class="text-[11px] text-slate-400">
 					Alles außer generierten PDFs/EMLs: Bewerbungen, Stammdaten, Lebenslauf,
