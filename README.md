@@ -32,12 +32,35 @@ npm run dev -- --open
 
 ## Building
 
-To create a production version of your app:
+There are three build targets. They share one SvelteKit frontend; only the base
+path and the packaging differ.
 
-```sh
-npm run build
+| Target | Command | Output |
+| --- | --- | --- |
+| Web (GitHub Pages) | `.\export.ps1` | `docs/` (base `/cv_meister`) |
+| Windows desktop (Tauri) | `npx tauri build` | `src-tauri/target/release/` |
+| Android APK (Tauri) | `.\apk-export.ps1` | `apk/cv-meister-<version>-aarch64-release.apk` |
+
+`npm run dev` and `npm run build` stay plain Vite/SvelteKit.
+
+The frontend is built for Tauri by `scripts/tauri-frontend.mjs`, which
+temporarily swaps `vite.config.ts` for an adapter-static variant with `base: ""`
+and restores it afterwards — the same technique `export.ps1` uses for the Pages
+base path, so the two never interfere.
+
+### Android prerequisites (once)
+
+```powershell
+winget install EclipseAdoptium.Temurin.17.JDK
+$sdk = "$env:LOCALAPPDATA\Android\Sdk"
+# cmdline-tools from https://developer.android.com/studio#command-line-tools-only,
+# unpacked to $sdk\cmdline-tools\latest
+& "$sdk\cmdline-tools\latest\bin\sdkmanager.bat" "platform-tools" `
+    "platforms/android-37.0" "build-tools/37.0.0" "ndk/27.0.12077973"
+rustup target add aarch64-linux-android
 ```
 
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+`apk-export.ps1` creates a self-signed keystore in `apk/` on its first run and
+reuses it. **Keep `apk/cv-meister-release.jks` and `apk/keystore.properties`** —
+Android ties app updates to the signing key, so losing them means an installed
+copy can never be updated in place.

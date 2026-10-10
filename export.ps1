@@ -64,6 +64,10 @@ Set-Content 'src/routes/+layout.ts' "export const prerender = true;`n"
 try {
     # 3. Build
     Write-Host "[3/4] Building static export..." -ForegroundColor Yellow
+    # Clear the generated directories with git instead of letting SvelteKit's
+    # own rimraf(.svelte-kit/output) do it: that recursive delete can trip this
+    # environment's safe-delete guard on a warm tree and abort the build.
+    & git clean -fdxq -- .svelte-kit/output build 2>$null
     npm run build
     if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 

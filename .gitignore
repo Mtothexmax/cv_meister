@@ -8,6 +8,11 @@ node_modules
 /.svelte-kit
 /build
 
+# Tauri / Android
+/src-tauri/target
+/src-tauri/gen
+/apk
+
 # OS
 .DS_Store
 Thumbs.db
