@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://accounts.google.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://*.googleusercontent.com https://lh3.googleusercontent.com; font-src 'self' data:; connect-src 'self' data: blob: ipc: http://ipc.localhost https://accounts.google.com https://www.googleapis.com https://gmail.googleapis.com; worker-src 'self' blob: data:; frame-src 'self' https://accounts.google.com; form-action 'self' https://assets.mailerlite.com; object-src 'none'; base-uri 'self'"
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://accounts.google.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://*.googleusercontent.com https://lh3.googleusercontent.com; font-src 'self' data:; connect-src 'self' data: blob: https: ipc: http://ipc.localhost; worker-src 'self' blob: data:; frame-src 'self' https://accounts.google.com; form-action 'self' https://assets.mailerlite.com; object-src 'none'; base-uri 'self'"
     }
   },
   "bundle": {

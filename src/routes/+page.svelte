@@ -57,6 +57,7 @@
 	import { requestGoogleToken, sendGmail, type MailAttachment } from "$lib/gmail";
 	import { loadState, saveState, type PersistedState } from "$lib/storage";
 	import { jsonHintSeen, markJsonHintSeen, visitorEmail } from "$lib/visitor";
+	import { isTauri } from "$lib/platform";
 	import Landing from "$lib/Landing.svelte";
 
 	type View = "dashboard" | "detail" | "static";
@@ -1749,7 +1750,13 @@
 		// visitor who has already signed up straight there as well — the landing
 		// page is a one-time step, not a gate in front of the product. An explicit
 		// "#start" always wins, so the editor's "Startseite" link keeps working.
-		editorActive = wantsEditor() || (visitorEmail() !== "" && !wantsLanding());
+		//
+		// In the Tauri shell the landing page is skipped unconditionally: there is
+		// no newsletter to sign up for there, so the marketing step has no meaning
+		// and the app should open where the work happens. "#start" still wins,
+		// which keeps the editor's "Startseite" link working in the shell too.
+		const shell = isTauri();
+		editorActive = wantsEditor() || ((shell || visitorEmail() !== "") && !wantsLanding());
 		if (wantsEditor()) void startEditor();
 		else if (editorActive) startFromLanding();
 		else void ensureHydrated();

@@ -48,6 +48,31 @@ temporarily swaps `vite.config.ts` for an adapter-static variant with `base: ""`
 and restores it afterwards — the same technique `export.ps1` uses for the Pages
 base path, so the two never interfere.
 
+### Shell behaviour (Tauri vs. web)
+
+The shell is not a web page, so two things differ. Both are keyed off `isTauri()`
+in `src/lib/platform.ts`:
+
+- **The editor opens directly.** There is no newsletter to sign up for inside
+  the app, so the marketing landing page is skipped. An explicit `#start` still
+  wins, which keeps the editor's "Startseite" link working in the shell too.
+- **`connect-src` allows any `https:` host.** A logo URL is arbitrary and cannot
+  be whitelisted ahead of time; without this the fetch is refused by the CSP and
+  surfaces as the bare `TypeError: Failed to fetch`. Every other directive stays
+  as strict as before.
+
+Verified against the real WebView2, not a browser:
+
+```bash
+.workbuddy-ai/run-tauri.sh
+```
+
+That builds a throwaway debug app with the remote debugging port baked in, then
+runs `.workbuddy-ai/verify-tauri.mjs` against it. The port cannot be enabled via
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` — Tauri sets that itself — hence the
+`--config` override on a throwaway build rather than a change to
+`tauri.conf.json`.
+
 ### Android prerequisites (once)
 
 ```powershell
