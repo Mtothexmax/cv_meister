@@ -85,6 +85,40 @@ $sdk = "$env:LOCALAPPDATA\Android\Sdk"
 rustup target add aarch64-linux-android
 ```
 
+### Android emulator (no device needed)
+
+```powershell
+.\emulator-start.ps1                 # restart the emulator, install the APK, launch the app
+.\emulator-start.ps1 -NoRestart      # push a new APK into the running emulator (no reboot)
+.\emulator-start.ps1 -Build          # rebuild the APK first
+```
+
+The emulator needs an **x86_64** APK: an x86_64 host cannot run an arm64 guest at
+all (`Avd's CPU Architecture 'arm64' is not supported by the QEMU2 emulator on
+x86_64 host`), so `-Target x86_64` is the default here, while `apk-export.ps1`
+keeps arm64 for real devices.
+
+Emulator setup (once) — mind the two different separators, `sdkmanager` wants `/`
+and `avdmanager` wants `;`:
+
+```powershell
+& "$sdk\cmdline-tools\latest\bin\sdkmanager.bat" "emulator" `
+    "system-images/android-35/google_apis/x86_64"
+echo no | & "$sdk\cmdline-tools\latest\bin\avdmanager.bat" create avd -n cv-meister `
+    -k "system-images;android-35;google_apis;x86_64" -d pixel_7
+```
+
+> **Known limitation — no Typst preview on Android.** The preview, and with it the
+> PDF export, does not render there: `typst-wasm` has no backend without
+> `SharedArrayBuffer`, which Android's WebView only exposes under cross-origin
+> isolation, and Tauri's `security.headers` never reach Android — the generated
+> `RustWebViewClient` serves assets through `WebViewAssetLoader` and so bypasses
+> the Rust handler those headers are applied in. The emulator's WebView (Chrome
+> 124) is also below JSPI, the alternative that would not need isolation. Adding
+> COOP/COEP to the config does not help Android and *breaks* the desktop build.
+> Desktop is unaffected.
+
+
 `apk-export.ps1` creates a self-signed keystore in `apk/` on its first run and
 reuses it. **Keep `apk/cv-meister-release.jks` and `apk/keystore.properties`** —
 Android ties app updates to the signing key, so losing them means an installed
