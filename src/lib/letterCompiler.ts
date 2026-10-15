@@ -1,6 +1,7 @@
 import { getCompiler } from "$lib/typst";
 import { buildLetterSource, type LetterData, type WorkSample } from "$lib/letter";
 import { buildCvSource, type CvData } from "$lib/cv";
+import { buildApplicationSource } from "$lib/application";
 import type { SharedData } from "$lib/shared";
 import type { JobData } from "$lib/job";
 import { logoExt, pdfCopyOf, tintSignatureImage } from "$lib/images";
@@ -241,4 +242,80 @@ export async function compileCvPdf(
 	const source = buildCvSource(shared, job, data, { profileFile: prep.profileFile });
 	const result = await compileSource(source, { binaries: prep.binaries }, "pdf");
 	return result.output!;
+}
+
+/**
+ * Everything the combined "Bewerbung" document needs: both texts plus the
+ * uploaded assets each of them uses. One object, because the two single-PDF
+ * entry points already take disjoint argument lists and stacking four more
+ * positional parameters onto them would be unreadable.
+ */
+export interface ApplicationAssets extends LetterAssets {
+	/** CV profile photo. */
+	photo?: File | null;
+}
+
+/**
+ * Compiles Anschreiben + Lebenslauf into one PDF, in a single Typst run.
+ *
+ * One run (rather than compiling twice and concatenating the bytes) is what
+ * makes the output a real single document — shared font subsetting, one
+ * metadata block, and no risk of the two halves disagreeing about the accent
+ * colour. It also means the compiler lock is taken once instead of twice.
+ */
+export async function compileApplicationPdf(
+	shared: SharedData,
+	job: JobData,
+	letter: LetterData,
+	cv: CvData,
+	allSamples: WorkSample[],
+	assets: ApplicationAssets = {},
+	disclaimer = "",
+): Promise<Uint8Array> {
+	// Both preparation steps are pure, so they can run without the compiler
+	// lock; only the compile itself has to be serialized.
+	const letterPrep = await buildLetterFiles(job, allSamples, assets);
+	const cvPrep = await buildCvFiles(assets.photo);
+
+	const source = buildApplicationSource(shared, job, letter, cv, letterPrep.samples, {
+		logoFile: letterPrep.logoFile,
+		signatureFile: letterPrep.signatureFile,
+		disclaimer,
+		profileFile: cvPrep.profileFile,
+	});
+
+	const result = await compileSource(
+		source,
+		{ binaries: { ...letterPrep.binaries, ...cvPrep.binaries } },
+		"pdf",
+	);
+	return result.output!;
+}
+
+/** Compiles the combined document to SVG pages (preview). */
+export async function compileApplication(
+	shared: SharedData,
+	job: JobData,
+	letter: LetterData,
+	cv: CvData,
+	allSamples: WorkSample[],
+	assets: ApplicationAssets = {},
+	disclaimer = "",
+): Promise<RenderedLetter> {
+	const letterPrep = await buildLetterFiles(job, allSamples, assets);
+	const cvPrep = await buildCvFiles(assets.photo);
+
+	const source = buildApplicationSource(shared, job, letter, cv, letterPrep.samples, {
+		logoFile: letterPrep.logoFile,
+		signatureFile: letterPrep.signatureFile,
+		disclaimer,
+		profileFile: cvPrep.profileFile,
+	});
+
+	const result = await compileSource(
+		source,
+		{ binaries: { ...letterPrep.binaries, ...cvPrep.binaries } },
+		"svg",
+	);
+	return { pages: result.pages, warnings: result.warnings };
 }

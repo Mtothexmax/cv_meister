@@ -23,3 +23,14 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.12.1", features = [] }
 tauri-plugin-log = "2"
+# Reading the clipboard natively: the Android WebView refuses
+# `navigator.clipboard.readText()` (see src/lib/clipboard.ts).
+tauri-plugin-clipboard-manager = "2"
+
+# Only the Android build hands the mail to Gmail through a native intent, and
+# that needs JNI plus the application context (see src/gmail_share.rs). Kept
+# target-specific so the desktop build stays free of them.
+[target.'cfg(target_os = "android")'.dependencies]
+base64 = "0.22"
+jni = "0.21"
+ndk-context = "0.1"

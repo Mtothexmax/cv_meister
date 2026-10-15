@@ -19,16 +19,22 @@
 # -Target x86_64 (the default here) produces. apk-export.ps1 keeps arm64 as its
 # default for real devices.
 #
+# WebView: the AVD must ship Android System WebView >= 137. Typst runs in
+# `typst-wasm`, which needs either SharedArrayBuffer (cross-origin isolation -
+# the Android WebView grants none, see README) or JSPI (Chromium 137+). The API
+# 35 image ships WebView 124 and the API 36 image 133, so both cannot render the
+# preview or export a PDF; API 37 ships 145 and works. Hence the default below.
+#
 # Prerequisites (once):
-#   sdkmanager "emulator" "system-images/android-35/google_apis/x86_64"
-#   avdmanager create avd -n cv-meister -k "system-images;android-35;google_apis;x86_64" -d pixel_7
-# Note the separators: sdkmanager wants "/" (system-images/android-35/...),
-# avdmanager wants ";" (system-images;android-35;...).
+#   sdkmanager "emulator" "system-images/android-37.0/google_apis/x86_64"
+#   avdmanager create avd -n cv-meister-37 -k "system-images;android-37.0;google_apis;x86_64" -d pixel_7
+# Note the separators: sdkmanager wants "/" (system-images/android-37.0/...),
+# avdmanager wants ";" (system-images;android-37.0;...).
 
 param(
     [ValidateSet('aarch64', 'armv7', 'i686', 'x86_64')]
     [string]$Target = 'x86_64',
-    [string]$Avd = 'cv-meister',
+    [string]$Avd = 'cv-meister-37',
     [switch]$NoRestart,
     [switch]$Build,
     [int]$BootTimeoutSeconds = 300
@@ -197,12 +203,15 @@ Start-Sleep -Seconds 3
 
 $appPid = ((& $adb -s $device.Serial shell pidof $AppId 2>$null) -join '').Trim()
 
-# The WebView version decides whether Typst can run at all: typst-wasm has no
-# backend without SharedArrayBuffer, which the Android WebView only exposes under
-# cross-origin isolation, and JSPI - the way around it - needs Chrome 137+.
+# The WebView version decides whether Typst can run at all: `typst-wasm` has no
+# backend without either SharedArrayBuffer (cross-origin isolation, which the
+# Android WebView does not grant) or JSPI (Chromium 137+). Everything below 137
+# therefore cannot render the preview or export a PDF - and no Tauri setting
+# changes that.
 $webview = ((& $adb -s $device.Serial shell dumpsys package com.google.android.webview 2>$null) |
     Select-String -Pattern 'versionName=(\S+)' | Select-Object -First 1)
 $webviewVersion = if ($webview) { $webview.Matches[0].Groups[1].Value } else { '?' }
+$webviewMajor = if ($webviewVersion -match '^(\d+)\.') { [int]$matches[1] } else { 0 }
 
 Write-Host ''
 Write-Host '=== Ready ===' -ForegroundColor Cyan
@@ -212,10 +221,14 @@ if ($appPid) {
 } else {
     Write-Host "App:     $AppId did NOT start - check 'adb logcat'" -ForegroundColor Red
 }
-Write-Host "WebView: $webviewVersion" -ForegroundColor $(if ($webviewVersion -match '^1[34]\d|^12\d') { 'Yellow' } else { 'Green' })
-if ($webviewVersion -match '^(1[0-2]\d|13[0-6])') {
-    Write-Host '         Chrome < 137 and no cross-origin isolation on Android: the Typst' -ForegroundColor Yellow
-    Write-Host '         preview cannot start ("No compatible typst-wasm backend").' -ForegroundColor Yellow
+if ($webviewMajor -ge 137) {
+    Write-Host "WebView: $webviewVersion - Typst-Vorschau und PDF-Export laufen (JSPI)." -ForegroundColor Green
+} else {
+    Write-Host "WebView: $webviewVersion" -ForegroundColor Red
+    Write-Host '         Zu alt: JSPI gibt es erst ab Chromium 137, und SharedArrayBuffer' -ForegroundColor Yellow
+    Write-Host '         gibt die Android-WebView gar nicht. Vorschau und PDF-Export' -ForegroundColor Yellow
+    Write-Host '         melden hier "Diese Browser-Engine kann Typst nicht ausfuehren".' -ForegroundColor Yellow
+    Write-Host '         Abhilfe: -Avd cv-meister-37 (API-37-Image, WebView 145).' -ForegroundColor Yellow
 }
 Write-Host ''
 Write-Host 'The emulator window is yours. Re-run with -NoRestart to push a new APK without rebooting.' -ForegroundColor DarkGray

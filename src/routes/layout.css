@@ -28,6 +28,30 @@
 	font-feature-settings: 'liga';
 }
 
+/* --- Systemleisten (Android/iOS) -------------------------------------------
+ * Ab targetSdk 35 zeichnet Android die App zwingend hinter die Systemleisten
+ * (edge-to-edge) und erwartet, dass die App ihren Inhalt selbst einrückt.
+ * Ohne Einrückung legt sich die Uhr der Statusleiste über die eigene
+ * Kopfzeile, und die Gestenleiste über den unteren Rand.
+ *
+ * `env()` liefert 0px, wo es keine Systemleisten gibt - Desktop, Tauri-Fenster
+ * und der Web-Build bleiben also unverändert. Die Klasse muss auf dem äußersten
+ * Container liegen; `position: fixed`-Elemente (Drawer, Modals) erben sie
+ * nicht und brauchen sie selbst.
+ */
+.safe-area {
+	padding-top: env(safe-area-inset-top, 0px);
+	padding-right: env(safe-area-inset-right, 0px);
+	padding-bottom: env(safe-area-inset-bottom, 0px);
+	padding-left: env(safe-area-inset-left, 0px);
+}
+
+/* Eine `sticky`-Kopfzeile klebt sonst bei 0 und rutscht beim Scrollen unter
+ * die Statusleiste. */
+.safe-sticky {
+	top: env(safe-area-inset-top, 0px);
+}
+
 /* Slim dark scrollbar, opt-in via the class. The native scrollbar is a bright
  * slab on the dark sidebar and eats ~15px of its 240px width; the rest of the
  * app keeps the native look. */

@@ -179,10 +179,10 @@
      keeps the prerenderer's hash-link check happy. -->
 <div
 	id="start"
-	class="min-h-screen bg-[#0a0f1d] text-gray-100 antialiased selection:bg-blue-500 selection:text-white"
+	class="safe-area min-h-screen bg-[#0a0f1d] text-gray-100 antialiased selection:bg-blue-500 selection:text-white"
 >
 	<!-- Navigation -->
-	<header class="sticky top-0 z-50 backdrop-blur-md bg-[#0a0f1d]/85 border-b border-gray-800">
+	<header class="safe-sticky sticky top-0 z-50 backdrop-blur-md bg-[#0a0f1d]/85 border-b border-gray-800">
 		<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
 			<a href="#start" class="flex items-center space-x-3 group">
 				<div

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Round variant of the adaptive launcher icon, see ic_launcher.xml.
+
+  Note: Tauri's AndroidManifest template does not set android:roundIcon, so this
+  file is currently not consulted — the launcher masks ic_launcher itself. It is
+  kept so the resource set is complete and so switching the manifest over is a
+  one-line change.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+    <monochrome android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

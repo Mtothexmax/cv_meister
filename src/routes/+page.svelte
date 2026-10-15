@@ -1,6 +1,13 @@
 <script lang="ts">
 	import { onMount, tick } from "svelte";
-	import { compileLetter, compileLetterPdf, compileCv, compileCvPdf } from "$lib/letterCompiler";
+	import {
+		compileApplication,
+		compileApplicationPdf,
+		compileLetter,
+		compileLetterPdf,
+		compileCv,
+		compileCvPdf,
+	} from "$lib/letterCompiler";
 	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, contactGreeting, safeAccentColor, type LetterData, type WorkSample } from "$lib/letter";
 	import {
 		DEFAULT_CV,
@@ -56,8 +63,12 @@
 	import { buildMotivationPrompt, buildCoverPrompt, buildMailPrompt } from "$lib/prompt";
 	import { requestGoogleToken, sendGmail, type MailAttachment } from "$lib/gmail";
 	import { loadState, saveState, type PersistedState } from "$lib/storage";
+	import { warmupCompiler } from "$lib/typst";
 	import { jsonHintSeen, markJsonHintSeen, visitorEmail } from "$lib/visitor";
-	import { isTauri } from "$lib/platform";
+	import { canUseGoogleSignIn, isTauri } from "$lib/platform";
+	import { readClipboardText } from "$lib/clipboard";
+	import { canOpenInGmail, openDraftInGmail } from "$lib/gmailShare";
+	import { hasNativeFiles, openFileNatively, saveFileNatively } from "$lib/fileShare";
 	import Landing from "$lib/Landing.svelte";
 
 	type View = "dashboard" | "detail" | "static";
@@ -194,6 +205,27 @@
 	let busy = $state<string | null>(null);
 	let sending = $state(false);
 	let sendStatus = $state<{ ok: boolean; message: string } | null>(null);
+	/**
+	 * Android app only: "In Gmail öffnen" needs a native intent, so the button is
+	 * shown where that exists and nowhere else. Set in `onMount`, because the
+	 * prerendered page has no `navigator` to ask.
+	 */
+	let gmailAvailable = $state(false);
+	/**
+	 * The other direction of the same question: "Mit Google versenden" needs
+	 * Google's sign-in popup, which the Android WebView does not have (see
+	 * `canUseGoogleSignIn`). Also set in `onMount`, for the same reason.
+	 */
+	let googleSendAvailable = $state(true);
+	/**
+	 * Where the last download landed, shown as a short-lived note.
+	 *
+	 * Only ever set in the Android app: there the download is a silent write
+	 * into the Downloads folder rather than the browser's own download bar, and
+	 * without the note "nothing happened" and "saved somewhere" look alike.
+	 */
+	let savedNote = $state("");
+	let savedTimer: ReturnType<typeof setTimeout> | undefined;
 	let ready = $state(false);
 	let previewCollapsed = $state(false);
 	/** Below `md` the sidebar is an off-canvas drawer instead of a fixed column. */
@@ -216,7 +248,12 @@
 	let logoUrlBusy = $state(false);
 	/** The dialog's text field, so opening it can put the cursor there. */
 	let logoUrlInputEl = $state<HTMLInputElement | null>(null);
-	type PreviewDoc = "letter" | "cv" | "mail";
+	/**
+	 * Which document the right-hand preview shows. `combined` is not a tab:
+	 * it is the mail preview, whose single "Bewerbung" row is what gets
+	 * rendered while the combined switch is on.
+	 */
+	type PreviewDoc = "letter" | "cv" | "mail" | "combined";
 	let previewDoc = $state<PreviewDoc>("letter");
 	let mailAvailable = $derived(activeJob.emailText.trim().length > 0);
 	let lastSaved = $state("");
@@ -365,18 +402,33 @@
 			const result =
 				previewDoc === "cv"
 					? await compileCv(shared, job, cvFor(job), photoFile)
-					: await compileLetter(
-							shared,
-							job,
-							job.letter,
-							samples,
-							{
-								logo: jf?.logo ?? null,
-								signature: signatureFile,
-								sampleFiles,
-							},
-							staticData.samplesDisclaimer,
-						);
+					: previewDoc === "combined"
+						? await compileApplication(
+								shared,
+								job,
+								job.letter,
+								cvFor(job),
+								samples,
+								{
+									logo: jf?.logo ?? null,
+									signature: signatureFile,
+									sampleFiles,
+									photo: photoFile,
+								},
+								staticData.samplesDisclaimer,
+							)
+						: await compileLetter(
+								shared,
+								job,
+								job.letter,
+								samples,
+								{
+									logo: jf?.logo ?? null,
+									signature: signatureFile,
+									sampleFiles,
+								},
+								staticData.samplesDisclaimer,
+							);
 			if (token !== renderToken) return;
 			// Only touch the DOM when content actually changed (avoids flicker).
 			const changed = !samePages(result.pages, pages);
@@ -513,6 +565,9 @@
 						j.anrede = "frau";
 					if (typeof j.accentColor !== "string") j.accentColor = "#4d3e1d";
 					if (typeof j.fuehrerschein !== "boolean") j.fuehrerschein = false;
+					// Absent in state saved before the combined PDF existed: "off" is
+					// the intended default (two separate documents stay the norm).
+					if (typeof j.combinedPdf !== "boolean") j.combinedPdf = false;
 					// Absent in state saved before the switch existed: "on" is the
 					// intended default, not an unknown.
 					if (typeof j.compressImages !== "boolean") j.compressImages = true;
@@ -577,6 +632,7 @@
 		render();
 	}
 
+
 	function selectPreview(d: PreviewDoc) {
 		if (d === "mail" && !mailAvailable) return;
 		dlog(`ui selectPreview ${d}`);
@@ -597,7 +653,24 @@
 		render();
 	}
 
-	function downloadBlob(pdf: Uint8Array, filename: string, mime = "application/pdf") {
+	/**
+	 * Saves bytes under `filename` — the one place every download button goes
+	 * through, which is exactly why the Android detour lives here.
+	 *
+	 * `a[download]` on a `blob:` URL is a no-op in the Android WebView: there is
+	 * no download manager behind the attribute, so the click produces no file
+	 * and no error either. Inside the app the bytes are written into the
+	 * device's Downloads folder instead (see `$lib/fileShare`), and the answer
+	 * says where they landed — the write is silent, so that note is the only
+	 * feedback the user gets.
+	 */
+	async function downloadBlob(pdf: Uint8Array, filename: string, mime = "application/pdf") {
+		if (hasNativeFiles()) {
+			savedNote = `Gespeichert: ${await saveFileNatively(pdf, filename, mime)}`;
+			clearTimeout(savedTimer);
+			savedTimer = setTimeout(() => (savedNote = ""), 6000);
+			return;
+		}
 		// Copy into a fresh buffer so the Blob owns plain ArrayBuffer bytes.
 		const blob = new Blob([pdf.slice().buffer as ArrayBuffer], { type: mime });
 		const url = URL.createObjectURL(blob);
@@ -618,8 +691,8 @@
 	// Arbeitsbereich (the full backup, with every image as base64) is a file.
 
 	/** Downloads a document as pretty-printed JSON. */
-	function downloadJson(doc: unknown, filename: string): void {
-		downloadBlob(
+	async function downloadJson(doc: unknown, filename: string): Promise<void> {
+		await downloadBlob(
 			new TextEncoder().encode(JSON.stringify(doc, null, 2)),
 			filename,
 			"application/json",
@@ -640,7 +713,9 @@
 	async function parseClipboardJson(kind: string): Promise<AnyDoc> {
 		let raw = "";
 		try {
-			raw = await navigator.clipboard.readText();
+			// Not `navigator.clipboard` directly: the Android WebView refuses the
+			// read, so the shell goes through the native clipboard (lib/clipboard.ts).
+			raw = await readClipboardText();
 		} catch {
 			throw new Error("Zwischenablage nicht lesbar (Zugriff verweigert).");
 		}
@@ -890,6 +965,21 @@
 	}
 
 	/**
+	 * Name of the combined document: "Bewerbung <Vorname Nachname>.pdf".
+	 *
+	 * Fixed to "Bewerbung" rather than derived from the job — the whole point of
+	 * the single file is that it is the complete application, and a portal that
+	 * accepts one upload usually also shows the file name to the reviewer.
+	 * Falls back to the company when no name is filled in yet, like the two
+	 * single documents do.
+	 */
+	function combinedFilename(job: JobData): string {
+		const tag =
+			`${shared.firstname} ${shared.lastname}`.trim() || job.firma.trim() || "dokument";
+		return `Bewerbung ${tag}.pdf`;
+	}
+
+	/**
 	 * The .eml carries the company name only: it is filed per company, and the
 	 * applicant's name already sits in the attached PDFs. Characters a download
 	 * name cannot hold are replaced rather than dropped, so the name stays
@@ -1051,7 +1141,7 @@
 				},
 				staticData.samplesDisclaimer,
 			);
-			downloadBlob(pdf, docFilename("Motivationsschreiben", job));
+			await downloadBlob(pdf, docFilename("Motivationsschreiben", job));
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -1065,7 +1155,7 @@
 		error = "";
 		try {
 			const pdf = await compileCvPdf(shared, job, cvFor(job), photoFile);
-			downloadBlob(pdf, docFilename("Lebenslauf", job));
+			await downloadBlob(pdf, docFilename("Lebenslauf", job));
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -1073,7 +1163,12 @@
 		}
 	}
 
-	/** Compiles both PDFs for a job (sequential: one shared compiler instance). */
+	/**
+	 * The two separately named PDFs of a job. Kept for the table's two quick
+	 * buttons, which always download the single documents no matter what the
+	 * combined switch says — that switch changes the *application mail*, not
+	 * what "Anschreiben" and "Lebenslauf" mean.
+	 */
 	async function compileBothPdfs(job: JobData): Promise<{ letterPdf: Uint8Array; cvPdf: Uint8Array }> {
 		const jf = jobFiles[job.id];
 		const assets = { logo: jf?.logo ?? null, signature: signatureFile, sampleFiles };
@@ -1089,11 +1184,17 @@
 		return { letterPdf, cvPdf };
 	}
 
+	/** The combined PDF alone (used when the switch is on). */
+	function compileCombinedPdfFor(job: JobData): Promise<Uint8Array> {
+		return compileCombinedPdf(job);
+	}
+
 	/**
 	 * Which PDF is attached to the application e-mail: one of the two generated
-	 * documents, or an uploaded extra PDF (`doc:<document id>`).
+	 * documents, the combined single file, or an uploaded extra PDF
+	 * (`doc:<document id>`).
 	 */
-	type MailAttKind = "letter" | "cv" | `doc:${string}`;
+	type MailAttKind = "letter" | "cv" | "combined" | `doc:${string}`;
 
 	/** Prefix that turns a document id into a `MailAttKind`. */
 	const DOC_PREFIX = "doc:";
@@ -1138,6 +1239,7 @@
 	function attFilename(kind: MailAttKind, job: JobData): string {
 		if (kind === "letter") return docFilename("Motivationsschreiben", job);
 		if (kind === "cv") return docFilename("Lebenslauf", job);
+		if (kind === "combined") return combinedFilename(job);
 		const doc = documents.find((d) => d.id === docIdOf(kind));
 		return doc ? documentFilename(doc) : "Dokument.pdf";
 	}
@@ -1146,17 +1248,26 @@
 	 * Every PDF attached to the application mail: the two generated documents
 	 * plus the uploaded extra PDFs, with their sizes. `size` is null for the
 	 * generated ones until the background computation has finished.
+	 *
+	 * With the combined switch on, the two generated entries collapse into the
+	 * single "Bewerbung" file — the mail must attach exactly what the user sees
+	 * in the preview, and attaching both the parts *and* their merge would send
+	 * the same content three times.
 	 */
 	function mailAttachments(
 		job: JobData = activeJob,
 	): { kind: MailAttKind; name: string; size: number | null }[] {
 		// Sizes are only measured for the open application; elsewhere the name is
 		// what matters (the JSON export lists attachment names).
-		const sizes = job.id === activeJob.id ? mailSizes : { letter: null, cv: null };
-		const list: { kind: MailAttKind; name: string; size: number | null }[] = [
-			{ kind: "letter", name: attFilename("letter", job), size: sizes.letter },
-			{ kind: "cv", name: attFilename("cv", job), size: sizes.cv },
-		];
+		const sizes =
+			job.id === activeJob.id ? mailSizes : { letter: null, cv: null, combined: null };
+		const list: { kind: MailAttKind; name: string; size: number | null }[] =
+			job.combinedPdf
+				? [{ kind: "combined", name: attFilename("combined", job), size: sizes.combined }]
+				: [
+						{ kind: "letter", name: attFilename("letter", job), size: sizes.letter },
+						{ kind: "cv", name: attFilename("cv", job), size: sizes.cv },
+					];
 		for (const doc of documents) {
 			// A row without a file has nothing to attach; the PDF tab says so.
 			const file = doc.id ? documentFiles[doc.id] : undefined;
@@ -1187,7 +1298,27 @@
 			);
 		}
 		if (kind === "cv") return compileCvPdf(shared, job, cvFor(job), photoFile);
+		if (kind === "combined") return compileCombinedPdf(job);
 		return readDocumentBytes(docIdOf(kind));
+	}
+
+	/** Anschreiben + Lebenslauf as one PDF, under the combined file name. */
+	function compileCombinedPdf(job: JobData): Promise<Uint8Array> {
+		const jf = jobFiles[job.id];
+		return compileApplicationPdf(
+			shared,
+			job,
+			job.letter,
+			cvFor(job),
+			samples,
+			{
+				logo: jf?.logo ?? null,
+				signature: signatureFile,
+				sampleFiles,
+				photo: photoFile,
+			},
+			staticData.samplesDisclaimer,
+		);
 	}
 
 	/** Downloads one attachment of the mail preview. */
@@ -1199,7 +1330,7 @@
 		try {
 			const pdf = await compileAttachment(kind, job);
 			if (busy !== key) return;
-			downloadBlob(pdf, attFilename(kind, job));
+			await downloadBlob(pdf, attFilename(kind, job));
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -1216,6 +1347,13 @@
 		try {
 			const pdf = await compileAttachment(kind, job);
 			if (busy !== key) return;
+			// Navigating to a `blob:` URL leaves the Android WebView exactly
+			// where it was — there is no PDF viewer behind it. The file goes to
+			// an installed viewer app through the native side instead.
+			if (hasNativeFiles()) {
+				await openFileNatively(pdf, attFilename(kind, job), "application/pdf");
+				return;
+			}
 			const blob = new Blob([pdf.slice().buffer as ArrayBuffer], { type: "application/pdf" });
 			// Same tab: the blob URL must stay alive while the browser replaces
 			// this page with its PDF viewer, so it is deliberately not revoked.
@@ -1228,20 +1366,32 @@
 	}
 
 	/**
-	 * Attachments for an outgoing mail, in order: the two generated PDFs, then
-	 * the uploaded extra documents. A document whose file is missing is skipped
-	 * rather than failing the whole send — mailAttachments() hides it too.
+	 * Attachments for an outgoing mail, in order: the generated PDF(s), then
+	 * the uploaded extra documents. With the combined switch on the two single
+	 * documents are replaced by the merged one — the mail carries exactly the
+	 * attachments the preview lists. A document whose file is missing is
+	 * skipped rather than failing the whole send — mailAttachments() hides it
+	 * too.
 	 */
 	async function mailAttachmentPayloads(job: JobData): Promise<MailAttachment[]> {
-		const { letterPdf, cvPdf } = await compileBothPdfs(job);
-		const list: MailAttachment[] = [
-			{
-				filename: docFilename("Motivationsschreiben", job),
+		const list: MailAttachment[] = [];
+		if (job.combinedPdf) {
+			list.push({
+				filename: combinedFilename(job),
 				mimeType: "application/pdf",
-				bytes: letterPdf,
-			},
-			{ filename: docFilename("Lebenslauf", job), mimeType: "application/pdf", bytes: cvPdf },
-		];
+				bytes: await compileCombinedPdfFor(job),
+			});
+		} else {
+			const { letterPdf, cvPdf } = await compileBothPdfs(job);
+			list.push(
+				{
+					filename: docFilename("Motivationsschreiben", job),
+					mimeType: "application/pdf",
+					bytes: letterPdf,
+				},
+				{ filename: docFilename("Lebenslauf", job), mimeType: "application/pdf", bytes: cvPdf },
+			);
+		}
 		for (const doc of documents) {
 			if (!doc.id || !documentFiles[doc.id]) continue;
 			list.push({
@@ -1259,12 +1409,23 @@
 		return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 	}
 
-	let mailSizes = $state<{ letter: number | null; cv: number | null }>({
+	let mailSizes = $state<{ letter: number | null; cv: number | null; combined: number | null }>({
 		letter: null,
 		cv: null,
+		combined: null,
 	});
 	let mailSizeToken = 0;
 	let mailSizeTimer: ReturnType<typeof setTimeout> | undefined;
+
+	/**
+	 * True once every attachment the mail will carry has been measured — the
+	 * two single documents, or the one merged file. The .eml and Gmail buttons
+	 * wait for this, so the check has to follow the switch rather than always
+	 * looking at the two halves (which are no longer produced).
+	 */
+	let attachmentsMeasured = $derived(
+		activeJob.combinedPdf ? mailSizes.combined != null : mailSizes.letter != null && mailSizes.cv != null,
+	);
 
 	function scheduleMailSizes() {
 		if (previewDoc !== "mail") return;
@@ -1279,9 +1440,17 @@
 		const token = ++mailSizeToken;
 		const job = activeJob;
 		try {
+			if (job.combinedPdf) {
+				// One compile instead of two: the combined preview shows a single
+				// row, so measuring the two halves separately would be wasted work.
+				const combined = await compileCombinedPdfFor(job);
+				if (token !== mailSizeToken) return;
+				mailSizes = { letter: null, cv: null, combined: combined.length };
+				return;
+			}
 			const { letterPdf, cvPdf } = await compileBothPdfs(job);
 			if (token !== mailSizeToken) return;
-			mailSizes = { letter: letterPdf.length, cv: cvPdf.length };
+			mailSizes = { letter: letterPdf.length, cv: cvPdf.length, combined: null };
 		} catch {
 			/* keep old sizes */
 		}
@@ -1303,7 +1472,7 @@
 				composeMailBody(shared, job, job.letter),
 				attachments,
 			);
-			downloadBlob(new TextEncoder().encode(mime), emlFilename(job), "message/rfc822");
+			await downloadBlob(new TextEncoder().encode(mime), emlFilename(job), "message/rfc822");
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -1336,6 +1505,34 @@
 		}
 	}
 
+	/**
+	 * Opens Gmail with a pre-filled draft, every attachment included.
+	 *
+	 * Android app only (see `$lib/gmailShare`). Unlike "Mit Google versenden"
+	 * this needs no Google login — the draft is handed over and the user still
+	 * presses Send in Gmail, which is also why it needs no OAuth scope.
+	 */
+	async function openInGmail() {
+		const job = activeJob;
+		const key = `${job.id}:gmail`;
+		busy = key;
+		error = "";
+		try {
+			const attachments = await mailAttachmentPayloads(job);
+			if (busy !== key) return;
+			await openDraftInGmail({
+				to: job.email.trim(),
+				subject: bewerbungTitel(job.rolle),
+				body: composeMailBody(shared, job, job.letter),
+				attachments,
+			});
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			if (busy === key) busy = null;
+		}
+	}
+
 	// --- Jobs ---
 
 	/**
@@ -1356,7 +1553,7 @@
 				documentFilename,
 				(id) => !!documentFiles[id],
 			);
-			downloadJson(doc, jsonFilename("Arbeitsbereich"));
+			await downloadJson(doc, jsonFilename("Arbeitsbereich"));
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		}
@@ -1704,6 +1901,24 @@
 		render();
 	}
 
+	/**
+	 * Turns the "one file instead of two" switch over. The checkbox lives in
+	 * the mail preview, so the attachment list is what has to be re-measured —
+	 * the two halves are no longer compiled, and the old sizes would otherwise
+	 * keep the .eml button disabled forever.
+	 */
+	function toggleCombinedPdf() {
+		activeJob.combinedPdf = !activeJob.combinedPdf;
+		// Turning the switch off removes the "Bewerbung" tab; leaving the preview
+		// pointed at a tab that no longer exists would strand the pane.
+		if (!activeJob.combinedPdf && previewDoc === "combined") previewDoc = "letter";
+		// Drop the stale measurements before the new ones arrive, so the list
+		// never shows an old size next to a new name.
+		mailSizes = { letter: null, cv: null, combined: null };
+		scheduleMailSizes();
+		render();
+	}
+
 	function selectDetailTab(t: DetailTab) {
 		detailTab = t;
 		previewDoc = t === "lebenslauf" ? "cv" : "letter";
@@ -1755,8 +1970,19 @@
 		// no newsletter to sign up for there, so the marketing step has no meaning
 		// and the app should open where the work happens. "#start" still wins,
 		// which keeps the editor's "Startseite" link working in the shell too.
+		// Which target this is decides whether the Gmail hand-off exists at all;
+		// it cannot be answered before the browser runs.
+		gmailAvailable = canOpenInGmail();
+		googleSendAvailable = canUseGoogleSignIn();
 		const shell = isTauri();
 		editorActive = wantsEditor() || ((shell || visitorEmail() !== "") && !wantsLanding());
+		// Start the engine load now instead of when the first render asks for it.
+		// Hydration and the IndexedDB read take roughly a second, and the first
+		// render cannot start before them — so loading the compiler afterwards
+		// only adds the engine's ~450 ms on top. Kicking it off here lets the two
+		// run side by side. Only for the editor: on the landing page the compiler
+		// is never needed.
+		if (editorActive) warmupCompiler();
 		if (wantsEditor()) void startEditor();
 		else if (editorActive) startFromLanding();
 		else void ensureHydrated();
@@ -1771,6 +1997,7 @@
 			clearTimeout(mailPromptTimer);
 			clearTimeout(saveTimer);
 			clearTimeout(mailSizeTimer);
+			clearTimeout(savedTimer);
 			window.removeEventListener("hashchange", syncRoute);
 			document.removeEventListener("visibilitychange", handleVisibility);
 			window.removeEventListener("pagehide", handlePageHide);
@@ -1844,7 +2071,7 @@
 </svelte:head>
 
 {#if editorActive}
-	<div class="bg-[#090d16] text-slate-100 flex h-dvh overflow-hidden">
+	<div class="safe-area bg-[#090d16] text-slate-100 flex h-dvh overflow-hidden">
 	{#snippet fileButton(
 		currentName: string | null,
 		onchange: (files: FileList | null) => void,
@@ -2091,7 +2318,7 @@
 
 	<!-- Sidebar: a fixed column from `md` up, an off-canvas drawer below. -->
 	<aside
-		class="fixed inset-y-0 left-0 z-40 w-60 bg-[#0e1422] border-r border-[#1e293b] flex flex-col shrink-0 select-none overflow-hidden transition-transform duration-200 md:static md:z-auto md:translate-x-0 md:transition-none {navOpen
+		class="safe-area fixed inset-y-0 left-0 z-40 w-60 bg-[#0e1422] border-r border-[#1e293b] flex flex-col shrink-0 select-none overflow-hidden transition-transform duration-200 md:static md:z-auto md:translate-x-0 md:transition-none {navOpen
 			? 'translate-x-0 shadow-2xl md:shadow-none'
 			: '-translate-x-full'}"
 	>
@@ -2213,7 +2440,9 @@
 	</aside>
 
 	<!-- Main -->
-	<main class="flex-1 flex flex-col h-dvh overflow-hidden">
+	<!-- `h-full` statt `h-dvh`: der Wurzelcontainer trägt bereits die
+	     Systemleisten-Einrückung, `100dvh` wäre hier um genau diese zu hoch. -->
+	<main class="flex-1 flex flex-col h-full overflow-hidden">
 		<header
 			class="h-14 px-3 md:px-6 border-b border-[#1e293b] flex items-center gap-2 justify-between shrink-0 bg-[#090d16]/80 z-10"
 		>
@@ -2314,80 +2543,98 @@
 							</button>
 						</div>
 
+						<!-- Die Aktionsknoepfe stehen an zwei Stellen, damit sie auf schmalen
+						     Bildschirmen nicht rechts aus dem Bild fallen: ab `lg` in der eigenen
+						     Spalte, darunter in einer zweiten Zeile unter den Angaben. Beide Stellen
+						     rendern denselben Snippet, es gibt also keine doppelte Logik. -->
+						{#snippet jobActions(j: JobData)}
+							<button
+								onclick={(e) => {
+									e.stopPropagation();
+									downloadLetterPdf(j);
+								}}
+								disabled={busy !== null}
+								class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 rounded text-[11px]"
+								title="Motivationsschreiben als PDF"
+							>
+								{busy === `${j.id}:letter` ? "…" : "Anschreiben"}
+							</button>
+							<button
+								onclick={(e) => {
+									e.stopPropagation();
+									downloadCvPdf(j);
+								}}
+								disabled={busy !== null}
+								class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 rounded text-[11px]"
+								title="Lebenslauf als PDF"
+							>
+								{busy === `${j.id}:cv` ? "…" : "Lebenslauf"}
+							</button>
+							<button
+								onclick={(e) => {
+									e.stopPropagation();
+									selectJob(j.id);
+								}}
+								class="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-[11px]"
+							>
+								Öffnen
+							</button>
+						{/snippet}
+
 						<div class="bg-[#131b2e] border border-[#1e293b] rounded-lg overflow-x-auto lg:overflow-hidden scroll-dark">
-							<table class="w-full min-w-[720px] lg:min-w-0 text-left border-collapse">
+							<table class="w-full text-left border-collapse">
 								<thead>
 									<tr
 										class="border-b border-[#1e293b] text-[10px] font-semibold text-slate-400 uppercase bg-slate-900/40"
 									>
-										<th class="py-3 px-4">Unternehmen & Position</th>
-										<th class="py-3 px-4">Stellen-Link</th>
-										<th class="py-3 px-4">Status</th>
-										<th class="py-3 px-4 text-right">Aktion</th>
+										<th class="py-3 px-2 lg:px-4">Unternehmen & Position</th>
+										<th class="py-3 px-2 lg:px-4">Stellen-Link</th>
+										<th class="py-3 px-2 lg:px-4">Status</th>
+										<th class="py-3 px-4 text-right hidden lg:table-cell">Aktion</th>
 									</tr>
 								</thead>
-								<tbody class="divide-y divide-[#1e293b] text-xs">
+								<tbody class="text-xs">
 									{#each jobs as j (j.id)}
-										<tr class="hover:bg-slate-800/40 cursor-pointer" onclick={() => selectJob(j.id)}>
-											<td class="py-3 px-4 font-semibold text-slate-100">
+										<tr class="border-t border-[#1e293b] first:border-t-0 hover:bg-slate-800/40 cursor-pointer" onclick={() => selectJob(j.id)}>
+											<td class="py-3 px-2 lg:px-4 font-semibold text-slate-100">
 												{j.firma || "Neue Firma"}
 												<span class="block text-[10px] text-blue-400 font-normal"
 													>{j.rolle.trim() ? bewerbungTitel(j.rolle) : "—"}</span
 												>
 											</td>
-											<td class="py-3 px-4">
+											<td class="py-3 px-2 lg:px-4">
 												{#if j.link}
 													<a
 														href={j.link}
 														target="_blank"
 														rel="noreferrer"
 														onclick={(e) => e.stopPropagation()}
-														class="text-blue-400 hover:underline font-mono text-[11px] truncate block max-w-[180px]"
-														>{j.link}</a
+														class="text-blue-400 hover:underline font-mono text-[11px] truncate block max-w-[110px] lg:max-w-[180px]"
+													>{j.link}</a
 													>
 												{:else}
 													<span class="text-slate-600">—</span>
 												{/if}
 											</td>
-											<td class="py-3 px-4">
+											<td class="py-3 px-2 lg:px-4">
 												<span
 													class="px-2 py-0.5 rounded text-[9px] font-mono border {statusCls(
 														j.status,
 													)}">{j.status}</span
 												>
 											</td>
-											<td class="py-3 px-4 text-right whitespace-nowrap">
-												<button
-													onclick={(e) => {
-														e.stopPropagation();
-														downloadLetterPdf(j);
-													}}
-													disabled={busy !== null}
-													class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 rounded text-[11px] mr-1"
-													title="Motivationsschreiben als PDF"
-												>
-													{busy === `${j.id}:letter` ? "…" : "Anschreiben"}
-												</button>
-												<button
-													onclick={(e) => {
-														e.stopPropagation();
-														downloadCvPdf(j);
-													}}
-													disabled={busy !== null}
-													class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 rounded text-[11px] mr-1"
-													title="Lebenslauf als PDF"
-												>
-													{busy === `${j.id}:cv` ? "…" : "Lebenslauf"}
-												</button>
-												<button
-													onclick={(e) => {
-														e.stopPropagation();
-														selectJob(j.id);
-													}}
-													class="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-[11px]"
-												>
-													Öffnen
-												</button>
+											<td class="py-3 px-4 hidden lg:table-cell">
+												<div class="flex justify-end gap-1">
+													{@render jobActions(j)}
+												</div>
+											</td>
+										</tr>
+										<!-- Zweite Zeile nur unterhalb von `lg`; colspan deckt alle drei Spalten ab. -->
+										<tr class="lg:hidden">
+											<td colspan="3" class="px-2 pb-3 pt-0 lg:px-4">
+												<div class="flex flex-wrap gap-1">
+													{@render jobActions(j)}
+												</div>
 											</td>
 										</tr>
 									{/each}
@@ -3126,6 +3373,19 @@
 						>
 							Lebenslauf
 						</button>
+						<!-- Only while the combined switch is on: a tab that cannot show
+						     anything is worse than no tab. -->
+						{#if activeJob.combinedPdf}
+							<button
+								onclick={() => selectPreview("combined")}
+								class="px-4 py-1.5 rounded-md text-xs font-medium transition-colors {previewDoc ===
+								'combined'
+									? 'bg-blue-600 text-white shadow'
+									: 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'}"
+							>
+								Bewerbung
+							</button>
+						{/if}
 					</div>
 				</div>
 				<p id="preview-status" class="text-center text-[10px] text-slate-500 h-4 mb-3">
@@ -3147,6 +3407,26 @@
 						</div>
 						<hr class="border-neutral-200" />
 						<p class="whitespace-pre-wrap leading-relaxed">{composeMailBody(shared, activeJob, activeJob.letter)}</p>
+						<!-- Sits directly above the attachment list because it changes
+						     exactly that list: two documents become one. -->
+						<label
+							id="combined-switch"
+							class="flex items-start gap-2 rounded border border-neutral-200 bg-neutral-50 p-2 cursor-pointer"
+						>
+							<input
+								type="checkbox"
+								checked={activeJob.combinedPdf}
+								onchange={() => toggleCombinedPdf()}
+								class="mt-0.5 w-4 h-4 rounded accent-blue-600 cursor-pointer shrink-0"
+							/>
+							<span class="text-xs text-neutral-700 leading-relaxed">
+								Lebenslauf und Motivationsschreiben als <strong>eine Datei</strong> ausgeben
+								<span class="text-neutral-500"
+									>— {combinedFilename(activeJob)}. Gilt für Vorschau, Download und den
+									E-Mail-Versand.</span
+								>
+							</span>
+						</label>
 						<div class="space-y-2">
 							{#each mailAttachments() as att (att.kind)}
 								<div class="flex items-center gap-3 rounded border border-neutral-200 bg-neutral-50 p-2">
@@ -3190,26 +3470,38 @@
 							</button>
 							<button
 								onclick={downloadEml}
-								disabled={busy !== null ||
-									mailSizes.letter == null ||
-									mailSizes.cv == null}
-								title={mailSizes.letter != null && mailSizes.cv != null
+								disabled={busy !== null || !attachmentsMeasured}
+								title={attachmentsMeasured
 									? "E-Mail mit allen Anhängen als .eml herunterladen"
 									: "Anhänge werden berechnet…"}
 								class="text-xs font-medium px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 text-white transition"
 							>
 								{busy?.endsWith(":eml") ? "…" : "Als E-Mail-Datei (.eml)"}
 							</button>
-							<button
-								onclick={sendViaGmail}
-								disabled={sending || !activeJob.email.trim()}
-								title={activeJob.email.trim()
-									? "Anschreiben + Lebenslauf als PDF an die Firmen-Mail senden"
-									: "Erst eine Firmen-Mail hinterlegen"}
-								class="text-xs font-medium px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white transition"
-							>
-								{sending ? "Wird versendet…" : "Mit Google versenden"}
-							</button>
+							{#if gmailAvailable}
+								<button
+									onclick={openInGmail}
+									disabled={busy !== null || !attachmentsMeasured}
+									title={attachmentsMeasured
+										? "Entwurf mit allen Anhängen in der Gmail-App öffnen"
+										: "Anhänge werden berechnet…"}
+									class="text-xs font-medium px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 text-white transition"
+								>
+									{busy?.endsWith(":gmail") ? "…" : "In Gmail öffnen"}
+								</button>
+							{/if}
+							{#if googleSendAvailable}
+								<button
+									onclick={sendViaGmail}
+									disabled={sending || !activeJob.email.trim()}
+									title={activeJob.email.trim()
+										? "Anschreiben + Lebenslauf als PDF an die Firmen-Mail senden"
+										: "Erst eine Firmen-Mail hinterlegen"}
+									class="text-xs font-medium px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white transition"
+								>
+									{sending ? "Wird versendet…" : "Mit Google versenden"}
+								</button>
+							{/if}
 						</div>
 						{#if sendStatus}
 							<p
@@ -3259,6 +3551,17 @@
 					<p class="whitespace-pre-wrap break-all">{line}</p>
 				{/each}
 			</div>
+		</div>
+	{/if}
+
+	{#if savedNote}
+		<!-- Android only: the file was written straight into the Downloads
+		     folder, so this note is the entire feedback the user gets. -->
+		<div
+			id="saved-note"
+			class="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 max-w-[calc(100vw-2rem)] rounded-lg bg-neutral-900/95 px-3 py-2 text-xs text-white shadow-lg break-all"
+		>
+			{savedNote}
 		</div>
 	{/if}
 

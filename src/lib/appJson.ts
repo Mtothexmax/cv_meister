@@ -195,6 +195,11 @@ export interface ApplicationNode {
 		fuehrerschein: JsonField<boolean>;
 		/** Whether the work samples are downscaled for preview and PDFs. */
 		bilderKomprimieren: JsonField<boolean>;
+		/**
+		 * Whether Anschreiben and Lebenslauf are delivered as one merged PDF
+		 * ("Bewerbung <Name>.pdf") instead of two separate files.
+		 */
+		eineDatei: JsonField<boolean>;
 		ausgeschalteteArbeitsproben: JsonField<string[]>;
 		ausgeschalteteWerte: JsonField<SkillEntryRef[]>;
 		verfuegbareArbeitsproben: JsonField<string[]>;
@@ -703,6 +708,11 @@ function applicationNode(input: ApplicationInput, withImages = false) {
 				job.compressImages,
 				SAMPLE_COMPRESSION_INFO,
 			),
+			eineDatei: field(
+				"Lebenslauf und Motivationsschreiben als eine Datei ausgeben",
+				job.combinedPdf,
+				'An = Anschreiben und Lebenslauf kommen als eine einzige PDF namens "Bewerbung <Vorname Nachname>.pdf" heraus — für Portale, die nur einen Upload erlauben. Aus = zwei getrennte Dateien (Motivationsschreiben …, Lebenslauf …).',
+			),
 			ausgeschalteteArbeitsproben: field(
 				"Arbeitsproben, die in DIESER Bewerbung nicht gezeigt werden",
 				filter.hiddenSampleTitles,
@@ -1034,6 +1044,8 @@ export function readApplicationNode(node: unknown, fallbackJobId: string): Parse
 		// Absent in files written before the switch existed: on is the default,
 		// not an unknown.
 		compressImages: readBool(auswahl.bilderKomprimieren, true),
+		// Off is the default: two separate documents stay the normal case.
+		combinedPdf: readBool(auswahl.eineDatei, false),
 	};
 
 	// The application's own CV. Only touched when the file actually carries the

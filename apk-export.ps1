@@ -175,6 +175,32 @@ if (-not (Test-Path $androidGen)) {
     Write-Host '[1/4] Android project present' -ForegroundColor Green
 }
 
+# The generated project is gitignored, so the keep rules native code depends on
+# live in src-tauri/android/ and are copied in on every build. Without them R8
+# strips `FileProvider.getUriForFile` — a method only the Rust side calls, by
+# name, through JNI — and the release APK then fails on the device with
+# NoSuchMethodError. Rationale in src-tauri/android/proguard-jni.pro.
+$jniRules = Join-Path $Root 'src-tauri/android/proguard-jni.pro'
+if (-not (Test-Path $jniRules)) { throw "Missing $jniRules" }
+Copy-Item $jniRules (Join-Path $androidGen 'app/proguard-jni.pro') -Force
+Write-Host '      -> proguard-jni.pro (JNI keep rules) copied into the project' -ForegroundColor DarkGray
+
+# Same reason for the launcher icon: the generated res/ is gitignored, so the
+# tracked icon set (the favicon, rasterised by src-tauri/android/make-icons.sh)
+# lives in src-tauri/android/res/ and is merged in on every build. Without this
+# the app ships Tauri's default logo, which is what `tauri android init` wrote.
+# `\*` plus an existing destination copies the *contents*; pointing -Recurse at
+# the directory itself would nest it as res/res/.
+$iconSrc = Join-Path $Root 'src-tauri/android/res'
+$resDst = Join-Path $androidGen 'app/src/main/res'
+$adaptiveIcon = Join-Path $iconSrc 'mipmap-anydpi-v26/ic_launcher.xml'
+if (-not (Test-Path $adaptiveIcon)) { throw "Missing $adaptiveIcon" }
+Copy-Item -Path (Join-Path $iconSrc '*') -Destination $resDst -Recurse -Force
+if (-not (Test-Path (Join-Path $resDst 'mipmap-anydpi-v26/ic_launcher.xml'))) {
+    throw "The launcher icons were not copied into $resDst"
+}
+Write-Host '      -> Launcher-Icons (Favicon) ins Projekt kopiert' -ForegroundColor DarkGray
+
 # --- 4. Build ---------------------------------------------------------------
 
 Write-Host "[2/4] Building the APK (tauri android build --apk --target $Target)..." -ForegroundColor Yellow
@@ -189,6 +215,27 @@ $built = Get-ChildItem $androidGen -Recurse -Filter '*.apk' -File |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $built) { throw "No APK found under $androidGen" }
 Write-Host "      -> $($built.FullName)" -ForegroundColor DarkGray
+
+# --- 4b. Guard: is the JNI-reached method still in the dex? ------------------
+#
+# The failure this catches is invisible until it is on a device, so it is
+# asserted here — before anything is signed or copied into apk/, so a broken
+# build can never end up looking like a good one. `apkanalyzer` lists the
+# methods that are really defined in the dex.
+$analyzer = Join-Path $sdk 'cmdline-tools/latest/bin/apkanalyzer.bat'
+if (Test-Path $analyzer) {
+    $defined = & $analyzer dex packages --defined-only $built.FullName 2>&1 | Out-String
+    # apkanalyzer prints `M d 1  1  423  androidx.core.content.FileProvider android.net.Uri getUriForFile(...)`
+    # — the return type sits *between* class and method, so the pattern has to
+    # allow for it instead of expecting the two names side by side.
+    if ($defined -notmatch 'androidx\.core\.content\.FileProvider [^\r\n]*getUriForFile\(') {
+        if ($defined -notmatch 'androidx\.core\.content\.FileProvider') {
+            throw "The dex check could not run at all - apkanalyzer said:`n$defined"
+        }
+        throw 'The dex has no FileProvider.getUriForFile: R8 stripped the method native code calls by name. Check src-tauri/android/proguard-jni.pro.'
+    }
+    Write-Host '      -> FileProvider.getUriForFile is in the dex (JNI keep rule holds)' -ForegroundColor DarkGray
+}
 
 # --- 5. Align and sign ------------------------------------------------------
 
@@ -243,7 +290,6 @@ if ($Debug) {
 Write-Host '[4/4] Inspecting the APK...' -ForegroundColor Yellow
 $sizeMb = [math]::Round((Get-Item $dest).Length / 1MB, 1)
 
-$analyzer = Join-Path $sdk 'cmdline-tools/latest/bin/apkanalyzer.bat'
 $appId = $null
 $libs = $null
 if (Test-Path $analyzer) {

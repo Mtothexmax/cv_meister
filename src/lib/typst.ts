@@ -1,5 +1,5 @@
 import { base } from "$app/paths";
-import { createTypstCompiler, type TypstCompiler } from "typst-wasm";
+import { createTypstCompiler, type TypstCompiler, type TypstCompilerOptions } from "typst-wasm";
 import { createWebWorker } from "typst-wasm/worker/browser";
 import workerUrl from "typst-wasm/worker/web-worker?url";
 import coreUrl from "typst-wasm/engine/engine.core.wasm?url";
@@ -79,6 +79,57 @@ function resolvePackageFile(spec: string): string | null {
 let _compiler: TypstCompiler | null = null;
 let _pending: Promise<TypstCompiler> | null = null;
 
+/**
+ * Names the engine the app is actually running in. Only used to make the
+ * missing-backend error below actionable, so a rough label is enough.
+ */
+function engineLabel(): string {
+	if (typeof navigator === "undefined") return "unbekannte Engine";
+	const ua = navigator.userAgent;
+	const chrome = /Chrome\/(\d+)/.exec(ua)?.[1];
+	// Android WebView identifies itself with a `wv` token; Chrome for Android
+	// does not. Both update through the Play Store, WebView separately.
+	if (chrome && /\bwv\b/.test(ua)) return `Android System WebView ${chrome}`;
+	if (chrome) return `Chrome/Chromium ${chrome}`;
+	return ua.slice(0, 80);
+}
+
+/**
+ * `typst-wasm` can only run with one of two engines underneath: the worker
+ * backend needs `SharedArrayBuffer` (i.e. cross-origin isolation) and the JSPI
+ * backend needs `WebAssembly.Suspending`/`promising` (Chromium 137+). On an
+ * engine that has neither, the library's own message names the *requirement*
+ * but not the remedy - and the remedy differs per platform. Since this is the
+ * one place where the compiler is created, every caller (both previews and both
+ * PDF exports) gets the actionable text from here.
+ */
+function explainMissingBackend(cause: unknown): Error {
+	const original = cause instanceof Error ? cause.message : String(cause);
+	const engine = engineLabel();
+	const android = /WebView/.test(engine);
+	return new Error(
+		`Diese Browser-Engine kann Typst nicht ausführen.\n` +
+			`Gefunden: ${engine}.\n` +
+			`Nötig ist eine Engine mit JSPI (Chrome/WebView 137 oder neuer) oder ` +
+			`mit SharedArrayBuffer (Cross-Origin-Isolation).\n` +
+			(android
+				? `Bitte im Play Store „Android System WebView“ aktualisieren.`
+				: `Bitte den Browser bzw. die WebView aktualisieren.`) +
+			`\n\nUrsprüngliche Meldung: ${original}`
+	);
+}
+
+/** `createTypstCompiler`, with the missing-backend error translated. */
+async function createCompilerSafely(options: TypstCompilerOptions): Promise<TypstCompiler> {
+	try {
+		return await createTypstCompiler(options);
+	} catch (e) {
+		const message = e instanceof Error ? e.message : String(e);
+		if (/No compatible typst-wasm backend/i.test(message)) throw explainMissingBackend(e);
+		throw e;
+	}
+}
+
 async function fetchBytes(url: string): Promise<Uint8Array> {
 	const res = await fetch(url);
 	if (!res.ok) throw new Error(`Failed to load ${url}: ${res.status}`);
@@ -90,7 +141,18 @@ export async function getCompiler(): Promise<TypstCompiler> {
 	if (_pending) return _pending;
 
 	_pending = (async () => {
-		const compiler = await createTypstCompiler({
+		// Kick the font fetches off before waiting for the engine, so that the
+		// 15 files are done by the time it is. Loading them only afterwards puts
+		// them on the critical path: the engine finishes at ~1.3 s and the fonts
+		// then add another ~100 ms on top of that (measured on the Android
+		// emulator: 2.13 s to the first page instead of 1.93 s).
+		const fonts = Promise.all(FONT_URLS.map(fetchBytes));
+		// A font that fails has to reach the `await` below; without this the
+		// rejection would surface as an unhandled one while the engine is still
+		// loading, and `render()` would report the wrong error.
+		fonts.catch(() => {});
+
+		const compiler = await createCompilerSafely({
 			backend: "auto",
 			worker: () => createWebWorker(workerUrl),
 			// Serve the vendored packages straight from the app's own assets.
@@ -114,7 +176,7 @@ export async function getCompiler(): Promise<TypstCompiler> {
 			},
 		});
 
-		await compiler.addFonts(...(await Promise.all(FONT_URLS.map(fetchBytes))));
+		await compiler.addFonts(...(await fonts));
 		_compiler = compiler;
 		return compiler;
 	})();
@@ -124,6 +186,23 @@ export async function getCompiler(): Promise<TypstCompiler> {
 	} finally {
 		_pending = null;
 	}
+}
+
+/**
+ * Starts loading the compiler and returns immediately.
+ *
+ * The first preview render needs the engine anyway, and on Android that is by
+ * far the most expensive step of the start: ~450 ms to read the 22.8 MB engine
+ * out of the APK, against only ~60 ms to actually compile it. The app spends
+ * roughly a second on hydration and the IndexedDB read before the first render
+ * is even requested, so waiting for that and only *then* loading the engine
+ * stacks the two costs. Calling this at mount overlaps them instead.
+ *
+ * Errors are deliberately swallowed: `render()` calls `getCompiler()` itself
+ * and reports the failure there, with the actionable message.
+ */
+export function warmupCompiler(): void {
+	void getCompiler().catch(() => {});
 }
 
 export async function disposeCompiler(): Promise<void> {

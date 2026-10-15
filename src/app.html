@@ -2,7 +2,10 @@
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<!-- `viewport-fit=cover` ist die Voraussetzung dafür, dass `env(safe-area-inset-*)`
+		     überhaupt Werte liefert. Android zeichnet die App ab targetSdk 35 zwingend
+		     hinter die Systemleisten; die Einrückung macht `layout.css` (.safe-area). -->
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 		<meta name="text-scale" content="scale" />
 		<!-- Google Identity Services (nur für Gmail-Versand nötig) -->
 		<script src="https://accounts.google.com/gsi/client" async defer></script>

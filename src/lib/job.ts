@@ -83,6 +83,17 @@ export interface JobData {
 	 */
 	ownCvEnabled: boolean;
 
+	/**
+	 * Render Anschreiben and Lebenslauf into a *single* PDF named
+	 * "Bewerbung <Name>.pdf" instead of two separate files.
+	 *
+	 * Some application portals accept exactly one upload, and two PDFs are then
+	 * a manual merge away from being useless. Off by default: the two separate
+	 * documents stay the normal case, and a single file is the exception a
+	 * portal forces on you.
+	 */
+	combinedPdf: boolean;
+
 	/** This job's cover-letter instance. */
 	letter: LetterData;
 }
@@ -114,6 +125,7 @@ export function createJob(partial: Partial<JobData> = {}): JobData {
 		hiddenSampleIds: [],
 		ownCv: null,
 		ownCvEnabled: false,
+		combinedPdf: false,
 		letter: structuredClone(DEFAULT_LETTER),
 		...partial,
 	};
