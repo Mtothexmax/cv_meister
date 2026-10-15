@@ -1,0 +1,120 @@
+name: Build Android APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Ein Build pro Tag; laufende alte Builds dieses Workflows abbrechen, wenn ein
+# neuer Tag gepusht wird (sollte selten vorkommen, aber sicher ist sicher).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK & Build-Tools
+        run: |
+          sdkmanager "platforms;android-37" "build-tools;37.0.0" "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      # Tauri braucht das generierte Android-Projekt. Es ist gitignored,
+      # deshalb muss es im CI frisch angelegt werden.
+      - name: Init Android project
+        run: npx tauri android init --ci
+
+      # Die Keep-Regeln fuer JNI (R8 darf FileProvider.getUriForFile nicht
+      # strippen) und die Launcher-Icons leben in src-tauri/android/ und
+      # muessen vor jedem Build ins generierte Projekt kopiert werden.
+      # (Gleiche Logik wie in apk-export.ps1.)
+      - name: Copy JNI keep-rules & icons
+        run: |
+          cp src-tauri/android/proguard-jni.pro src-tauri/gen/android/app/
+          mkdir -p src-tauri/gen/android/app/src/main/res
+          cp -r src-tauri/android/res/* src-tauri/gen/android/app/src/main/res/
+
+      # Das Frontend wird von Tauris beforeBuildCommand gebaut
+      # (scripts/tauri-frontend.mjs), deshalb reicht hier der reine
+      # Android-Build-Aufruf.
+      - name: Build release APK
+        run: npx tauri android build --apk --target aarch64 --ci
+        env:
+          NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+
+      - name: Locate built APK
+        id: apk
+        run: |
+          APK=$(find src-tauri/gen/android -name '*.apk' -type f | head -1)
+          if [ -z "$APK" ]; then
+            echo "No APK found" >&2
+            exit 1
+          fi
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$APK")" >> "$GITHUB_OUTPUT"
+
+      # Unsigned release-APKs sind von Android nicht installierbar. Im CI
+      # erstellen wir ein frisches, selbstsigniertes Debug-Keystore und
+      # signieren damit — fuer einen echten Store-Release waere ein
+      # persistiertes Keystore noetig (GitHub Secret + base64-decode).
+      - name: Sign APK
+        run: |
+          KEYSTORE=ci-release.jks
+          ALIAS=ci-key
+          PASS=$(openssl rand -hex 16)
+
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE" -alias "$ALIAS" \
+            -keyalg RSA -keysize 4096 -validity 10000 \
+            -storepass "$PASS" -keypass "$PASS" \
+            -dname "CN=CV Meister CI, OU=CI, O=CV Meister, C=DE"
+
+          BUILD_TOOLS=$(ls -d "$ANDROID_SDK_ROOT/build-tools/"* | sort -V | tail -1)
+          ALIGNED=aligned.apk
+          SIGNED=signed.apk
+
+          "$BUILD_TOOLS/zipalign" -f -p 4 "${{ steps.apk.outputs.path }}" "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$KEYSTORE" --ks-key-alias "$ALIAS" \
+            --ks-pass "pass:$PASS" --key-pass "pass:$PASS" \
+            --out "$SIGNED" "$ALIGNED"
+
+          mv "$SIGNED" "${{ steps.apk.outputs.name }}"
+          echo "signed=${{ steps.apk.outputs.name }}" >> "$GITHUB_OUTPUT"
+        id: sign
+
+      - name: Upload APK to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.sign.outputs.signed }}
+          name: Release ${{ github.ref_name }}
+          generate_release_notes: true
