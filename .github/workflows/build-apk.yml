@@ -37,21 +37,26 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # Der ubuntu-latest Runner hat bereits ANDROID_SDK_ROOT gesetzt und
-      # cmdline-tools installiert. Die veraltete Action
-      # android-actions/setup-android versucht 'tools' zu installieren, was
-      # nicht mehr existiert (deprecated seit cmdline-tools). Stattdessen
-      # sdkmanager direkt aufrufen.
+      # Der ubuntu-latest Runner hat kein Android SDK vorinstalliert. Die
+      # veraltete android-actions/setup-android@v3 scheitert am Paket 'tools'.
+      # Stattdessen laden wir die offiziellen cmdline-tools herunter und
+      # installieren NDK + Build-Tools selbst.
       - name: Setup Android SDK
         run: |
-          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          sdkmanager --version
-
-      - name: Install Android NDK & Build-Tools
-        run: |
+          set -e
+          ANDROID_HOME=$HOME/android-sdk
+          mkdir -p $ANDROID_HOME/cmdline-tools
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip -o cmdline-tools.zip
+          unzip -q cmdline-tools.zip -d $ANDROID_HOME/cmdline-tools/
+          mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+          rm cmdline-tools.zip
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager "platforms;android-37" "build-tools;37.0.0" "ndk;27.0.12077973"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
 
       - name: Install Node dependencies
         run: npm ci
