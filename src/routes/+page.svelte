@@ -3567,63 +3567,74 @@
 							</div>
 
 							<!-- Personalia -->
-							<div class="grid grid-cols-2 gap-3">
-								<div>
-									<span class={labelCls}>Vorname</span>
-									<input bind:value={shared.firstname} class={inputCls} />
+							{#if shared.language === "de"}
+								<div class="space-y-3">
+									<div>
+										<span class={labelCls}>Vorname</span>
+										<input bind:value={shared.firstname} class={inputCls} />
+									</div>
+									<div>
+										<span class={labelCls}>Nachname</span>
+										<input bind:value={shared.lastname} class={inputCls} />
+									</div>
 								</div>
-								<div>
-									<span class={labelCls}>First Name</span>
-									<input bind:value={shared.firstnameEn} class={inputCls} placeholder="(optional)" />
+							{:else}
+								<div class="space-y-3">
+									<div>
+										<span class={labelCls}>First Name</span>
+										<input bind:value={shared.firstnameEn} class={inputCls} />
+									</div>
+									<div>
+										<span class={labelCls}>Last Name</span>
+										<input bind:value={shared.lastnameEn} class={inputCls} />
+									</div>
 								</div>
-								<div>
-									<span class={labelCls}>Nachname</span>
-									<input bind:value={shared.lastname} class={inputCls} />
-								</div>
-								<div>
-									<span class={labelCls}>Last Name</span>
-									<input bind:value={shared.lastnameEn} class={inputCls} placeholder="(optional)" />
-								</div>
-							</div>
+							{/if}
 
 							<!-- Contact -->
-							<div class="grid grid-cols-2 gap-3 pt-2 border-t border-[#1e293b]">
-								<div>
-									<span class={labelCls}>E-Mail</span>
-									<input bind:value={shared.email} class={inputCls} />
-								</div>
-								<div>
-									<span class={labelCls}>E-Mail (EN)</span>
-									<input bind:value={shared.emailEn} class={inputCls} placeholder="(optional)" />
-								</div>
-								<div>
-									<span class={labelCls}>Telefon</span>
-									<input bind:value={shared.phone} class={inputCls} />
-								</div>
-								<div>
-									<span class={labelCls}>Phone (EN)</span>
-									<input bind:value={shared.phoneEn} class={inputCls} placeholder="(optional)" />
-								</div>
-								<div class="col-span-1">
-									<span class={labelCls}>Adresse</span>
-									<input bind:value={shared.address} class={inputCls} />
-								</div>
-								<div class="col-span-1">
-									<span class={labelCls}>Address (EN)</span>
-									<input bind:value={shared.addressEn} class={inputCls} placeholder="(optional)" />
-								</div>
+							<div class="space-y-3 pt-3 border-t border-[#1e293b]">
+								{#if shared.language === "de"}
+									<div>
+										<span class={labelCls}>E-Mail</span>
+										<input bind:value={shared.email} class={inputCls} />
+									</div>
+									<div>
+										<span class={labelCls}>Telefon</span>
+										<input bind:value={shared.phone} class={inputCls} />
+									</div>
+									<div>
+										<span class={labelCls}>Adresse</span>
+										<input bind:value={shared.address} class={inputCls} />
+									</div>
+								{:else}
+									<div>
+										<span class={labelCls}>E-Mail</span>
+										<input bind:value={shared.emailEn} class={inputCls} />
+									</div>
+									<div>
+										<span class={labelCls}>Phone</span>
+										<input bind:value={shared.phoneEn} class={inputCls} />
+									</div>
+									<div>
+										<span class={labelCls}>Address</span>
+										<input bind:value={shared.addressEn} class={inputCls} />
+									</div>
+								{/if}
 							</div>
 
 							<!-- Signature -->
-							<div class="grid grid-cols-2 gap-3 pt-2 border-t border-[#1e293b]">
-								<div>
-									<span class={labelCls}>Signatur-Name</span>
-									<input bind:value={shared.signatureName} class={inputCls} />
-								</div>
-								<div>
-									<span class={labelCls}>Signature Name (EN)</span>
-									<input bind:value={shared.signatureNameEn} class={inputCls} placeholder="(optional)" />
-								</div>
+							<div class="space-y-3 pt-3 border-t border-[#1e293b]">
+								{#if shared.language === "de"}
+									<div>
+										<span class={labelCls}>Signatur-Name</span>
+										<input bind:value={shared.signatureName} class={inputCls} />
+									</div>
+								{:else}
+									<div>
+										<span class={labelCls}>Signature Name</span>
+										<input bind:value={shared.signatureNameEn} class={inputCls} />
+									</div>
+								{/if}
 							</div>
 
 							<!-- Salary & Start -->
