@@ -1,0 +1,1 @@
+import{o as e}from"../nodes/2.DSWaWwtd.js";export{e as buildMimeMessage};
