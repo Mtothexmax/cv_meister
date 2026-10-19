@@ -18,6 +18,7 @@ export interface WorkSample {
 }
 
 import type { SharedData } from "./shared.js";
+import { loc } from "./shared.js";
 import type { JobData } from "./job.js";
 
 export interface LetterData {
@@ -175,7 +176,7 @@ export function composeMailBody(
 	if (greet) parts.push(greet);
 	if (job.emailText.trim()) parts.push(job.emailText.trim());
 	// Closing + name belong directly together (single line break, no blank line).
-	const signoff = [letter.closing.trim(), shared.signatureName.trim()]
+	const signoff = [letter.closing.trim(), loc(shared, "signatureName").trim()]
 		.filter(Boolean)
 		.join("\n");
 	if (signoff) parts.push(signoff);
@@ -288,11 +289,11 @@ export function buildLetterSource(
     text()[ ]
   },
   author: (
-    firstname: ${typstString(shared.firstname)},
-    lastname: ${typstString(shared.lastname)},
-    email: ${typstString(shared.email)},
-    phone: ${typstString(shared.phone)},
-    address: ${typstString(shared.address)},
+    firstname: ${typstString(loc(shared, "firstname"))},
+    lastname: ${typstString(loc(shared, "lastname"))},
+    email: ${typstString(loc(shared, "email"))},
+    phone: ${typstString(loc(shared, "phone"))},
+    address: ${typstString(loc(shared, "address"))},
     positions: (${roleLine ? `${typstString(roleLine)},` : ""}),
   ),
   profile-picture: box(width: 0pt, height: 0pt),
@@ -326,7 +327,7 @@ ${greetingBlock}${letterBodyParagraphs(data.body, null)}
   spacing: 0.2em,
   text[${typstContent(data.closing)}],
   ${signature},
-  text(weight: "bold")[${typstContent(shared.signatureName)}],
+  text(weight: "bold")[${typstContent(loc(shared, "signatureName"))}],
 )]
 ]
 ${renderWorkSamples(samples, opts.disclaimer ?? "")}`;

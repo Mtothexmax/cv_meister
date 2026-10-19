@@ -43,6 +43,8 @@
 		readApplicationJson,
 		readArt,
 		readCvJson,
+		sharedNode,
+		readSharedNode,
 		readWorkspaceJson,
 		type AnyDoc,
 		type ApplicationDoc,
@@ -70,6 +72,7 @@
 	import { canOpenInGmail, openDraftInGmail } from "$lib/gmailShare";
 	import { hasNativeFiles, openFileNatively, saveFileNatively } from "$lib/fileShare";
 	import Landing from "$lib/Landing.svelte";
+	import { t, type Language } from "$lib/i18n";
 
 	type View = "dashboard" | "detail" | "static";
 	type StaticTab = "stammdaten" | "lebenslauf" | "erfahrung" | "proben" | "pdf";
@@ -79,21 +82,13 @@
 	 */
 	type DetailTab = "bewerbung" | "lebenslauf";
 
-	const staticTabs: { id: StaticTab; label: string }[] = [
-		{ id: "stammdaten", label: "Stammdaten" },
-		{ id: "lebenslauf", label: "Lebenslauf" },
-		{ id: "erfahrung", label: "Erfahrung" },
-		{ id: "proben", label: "Arbeitsproben" },
-		{ id: "pdf", label: "PDF" },
-	];
-
 	/**
 	 * Single source of truth for "is this a tab we still know about" — used for
 	 * both the persisted state and the JSON import. A dropped/renamed tab id
 	 * falls back to Stammdaten instead of rendering an empty pane.
 	 */
 	function isStaticTab(v: unknown): v is StaticTab {
-		return typeof v === "string" && staticTabs.some((t) => t.id === v);
+		return typeof v === "string" && ["stammdaten", "lebenslauf", "erfahrung", "proben", "pdf"].includes(v);
 	}
 
 	let view = $state<View>("dashboard");
@@ -108,6 +103,14 @@
 	let detailTab = $state<DetailTab>("bewerbung");
 	let activeJobId = $state<string>("");
 	let activeJob = $derived(jobs.find((j) => j.id === activeJobId) ?? jobs[0]);
+
+	const staticTabs = $derived<{ id: StaticTab; label: string }[]>([
+		{ id: "stammdaten", label: t("tab.stammdaten", shared.language) },
+		{ id: "lebenslauf", label: t("tab.lebenslauf", shared.language) },
+		{ id: "erfahrung", label: t("tab.erfahrung", shared.language) },
+		{ id: "proben", label: t("tab.proben", shared.language) },
+		{ id: "pdf", label: t("tab.pdf", shared.language) },
+	]);
 
 	/**
 	 * The CV an application renders.
@@ -277,6 +280,11 @@
 	let cvCopyTimer: ReturnType<typeof setTimeout> | undefined;
 	let cvImportError = $state("");
 	let logoNote = $state("");
+
+	// Stammdaten JSON export/import state
+	let sharedJsonCopied = $state(false);
+	let sharedJsonTimer: ReturnType<typeof setTimeout> | undefined;
+	let sharedJsonError = $state("");
 
 	// --- Landing page / editor routing -------------------------------------
 	// The whole app is one route. "/" (or "#start") shows the marketing
@@ -550,6 +558,14 @@
 				shared.einstiegArt = "monate";
 			if (typeof shared.einstiegDatum !== "string") shared.einstiegDatum = "";
 			if (typeof shared.einstiegMonate !== "string") shared.einstiegMonate = "2";
+			// Language & bilingual fields (new in this version)
+			if (shared.language !== "de" && shared.language !== "en") shared.language = "de";
+			if (typeof shared.firstnameEn !== "string") shared.firstnameEn = "";
+			if (typeof shared.lastnameEn !== "string") shared.lastnameEn = "";
+			if (typeof shared.emailEn !== "string") shared.emailEn = "";
+			if (typeof shared.phoneEn !== "string") shared.phoneEn = "";
+			if (typeof shared.addressEn !== "string") shared.addressEn = "";
+			if (typeof shared.signatureNameEn !== "string") shared.signatureNameEn = "";
 			if (Array.isArray(s.jobs) && s.jobs.length > 0) {
 				jobs = s.jobs as JobData[];
 				for (const j of jobs) {
@@ -1120,6 +1136,219 @@
 			scheduleRender();
 		} catch (e) {
 			cvImportError = e instanceof Error ? e.message : "Import fehlgeschlagen";
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Shared data (Stammdaten) JSON export / import
+	// -----------------------------------------------------------------------
+
+	async function copySharedJson() {
+		try {
+			const payload = JSON.stringify(
+				{
+					format: "cv-meister",
+					version: JSON_VERSION,
+					art: "stammdaten",
+					exportiert: new Date().toISOString(),
+					stammdaten: sharedNode($state.snapshot(shared)),
+				},
+				null,
+				2,
+			);
+			await navigator.clipboard.writeText(payload);
+			sharedJsonCopied = true;
+			clearTimeout(sharedJsonTimer);
+			sharedJsonTimer = setTimeout(() => (sharedJsonCopied = false), 1500);
+		} catch {
+			sharedJsonError = "Kopieren fehlgeschlagen (Clipboard blockiert).";
+		}
+	}
+
+	async function importSharedJson(): Promise<void> {
+		sharedJsonError = "";
+		try {
+			const doc = await parseClipboardJson("Stammdaten");
+			if (doc.art !== "stammdaten") {
+				throw new Error(`Erwartet werden Stammdaten, gefunden: "${doc.art}".`);
+			}
+			const next = readSharedNode(doc.stammdaten, shared);
+			if (next) {
+				shared = next;
+				scheduleSave();
+				render();
+			}
+		} catch (e) {
+			sharedJsonError = e instanceof Error ? e.message : "Import fehlgeschlagen";
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Static data (Erfahrung) JSON export / import
+	// -----------------------------------------------------------------------
+
+	let staticJsonCopied = $state(false);
+	let staticJsonTimer: ReturnType<typeof setTimeout> | undefined;
+	let staticJsonError = $state("");
+
+	async function copyStaticJson() {
+		try {
+			const payload = JSON.stringify(
+				{
+					format: "cv-meister",
+					version: JSON_VERSION,
+					art: "erfahrung",
+					exportiert: new Date().toISOString(),
+					erfahrung: staticData.erfahrung,
+					antrieb: staticData.antrieb,
+					arbeitsprobenHinweis: staticData.samplesDisclaimer,
+				},
+				null,
+				2,
+			);
+			await navigator.clipboard.writeText(payload);
+			staticJsonCopied = true;
+			clearTimeout(staticJsonTimer);
+			staticJsonTimer = setTimeout(() => (staticJsonCopied = false), 1500);
+		} catch {
+			staticJsonError = "Kopieren fehlgeschlagen (Clipboard blockiert).";
+		}
+	}
+
+	async function importStaticJson(): Promise<void> {
+		staticJsonError = "";
+		try {
+			const doc = await parseClipboardJson("Erfahrung");
+			const d = doc as unknown as Record<string, unknown>;
+			if (d.art !== "erfahrung") {
+				throw new Error(`Erwartet wird Erfahrung, gefunden: "${d.art}".`);
+			}
+			if (typeof d.erfahrung === "string") staticData.erfahrung = d.erfahrung;
+			if (typeof d.antrieb === "string") staticData.antrieb = d.antrieb;
+			if (typeof d.arbeitsprobenHinweis === "string") staticData.samplesDisclaimer = d.arbeitsprobenHinweis;
+			scheduleSave();
+		} catch (e) {
+			staticJsonError = e instanceof Error ? e.message : "Import fehlgeschlagen";
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Work samples (Arbeitsproben) JSON export / import
+	// -----------------------------------------------------------------------
+
+	let samplesJsonCopied = $state(false);
+	let samplesJsonTimer: ReturnType<typeof setTimeout> | undefined;
+	let samplesJsonError = $state("");
+
+	async function copySamplesJson() {
+		try {
+			const payload = JSON.stringify(
+				{
+					format: "cv-meister",
+					version: JSON_VERSION,
+					art: "arbeitsproben",
+					exportiert: new Date().toISOString(),
+					arbeitsproben: samples.map((s) => ({
+						titel: s.title,
+						beschreibung: s.description,
+						link: s.link ?? "",
+						bild: s.image ?? "",
+					})),
+				},
+				null,
+				2,
+			);
+			await navigator.clipboard.writeText(payload);
+			samplesJsonCopied = true;
+			clearTimeout(samplesJsonTimer);
+			samplesJsonTimer = setTimeout(() => (samplesJsonCopied = false), 1500);
+		} catch {
+			samplesJsonError = "Kopieren fehlgeschlagen (Clipboard blockiert).";
+		}
+	}
+
+	async function importSamplesJson(): Promise<void> {
+		samplesJsonError = "";
+		try {
+			const doc = await parseClipboardJson("Arbeitsproben");
+			const d = doc as unknown as Record<string, unknown>;
+			if (d.art !== "arbeitsproben") {
+				throw new Error(`Erwartet werden Arbeitsproben, gefunden: "${d.art}".`);
+			}
+			const list = d.arbeitsproben;
+			if (!Array.isArray(list)) throw new Error("Fehlendes Feld: arbeitsproben");
+			const next: WorkSample[] = [];
+			for (const raw of list) {
+				const r = raw as Record<string, unknown>;
+				next.push({
+					id: nid(),
+					title: typeof r.titel === "string" ? r.titel : "",
+					description: typeof r.beschreibung === "string" ? r.beschreibung : "",
+					link: typeof r.link === "string" ? r.link : undefined,
+				});
+			}
+			samples = next;
+			sampleFiles = {};
+			scheduleSave();
+			render();
+		} catch (e) {
+			samplesJsonError = e instanceof Error ? e.message : "Import fehlgeschlagen";
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Extra documents (PDF) JSON export / import
+	// -----------------------------------------------------------------------
+
+	let docsJsonCopied = $state(false);
+	let docsJsonTimer: ReturnType<typeof setTimeout> | undefined;
+	let docsJsonError = $state("");
+
+	async function copyDocumentsJson() {
+		try {
+			const payload = JSON.stringify(
+				{
+					format: "cv-meister",
+					version: JSON_VERSION,
+					art: "dokumente",
+					exportiert: new Date().toISOString(),
+					dokumente: documents.map((d) => ({ id: d.id, name: d.name })),
+				},
+				null,
+				2,
+			);
+			await navigator.clipboard.writeText(payload);
+			docsJsonCopied = true;
+			clearTimeout(docsJsonTimer);
+			docsJsonTimer = setTimeout(() => (docsJsonCopied = false), 1500);
+		} catch {
+			docsJsonError = "Kopieren fehlgeschlagen (Clipboard blockiert).";
+		}
+	}
+
+	async function importDocumentsJson(): Promise<void> {
+		docsJsonError = "";
+		try {
+			const doc = await parseClipboardJson("Dokumente");
+			const d = doc as unknown as Record<string, unknown>;
+			if (d.art !== "dokumente") {
+				throw new Error(`Erwartet werden Dokumente, gefunden: "${d.art}".`);
+			}
+			const list = d.dokumente;
+			if (!Array.isArray(list)) throw new Error("Fehlendes Feld: dokumente");
+			const next: ExtraDocument[] = [];
+			for (const raw of list) {
+				const r = raw as Record<string, unknown>;
+				next.push({
+					id: typeof r.id === "string" ? r.id : nid(),
+					name: typeof r.name === "string" ? r.name : "",
+				});
+			}
+			documents = ensureDocumentIds(next);
+			documentFiles = {};
+			scheduleSave();
+		} catch (e) {
+			docsJsonError = e instanceof Error ? e.message : "Import fehlgeschlagen";
 		}
 	}
 
@@ -3110,7 +3339,28 @@
 				{:else if staticTab === "proben"}
 					<div class="space-y-4 max-w-5xl">
 						<div class="{cardCls} space-y-2">
-							<h4 class={hCls}>Hinweis über den Proben</h4>
+							<div class="flex items-center justify-between">
+								<h4 class={hCls}>Hinweis über den Proben</h4>
+								<div class="flex gap-2">
+									<button
+										class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors"
+										onclick={copySamplesJson}
+										title="Arbeitsproben als JSON kopieren"
+									>
+										{samplesJsonCopied ? "✓ Kopiert!" : "JSON kopieren"}
+									</button>
+									<button
+										class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors"
+										onclick={importSamplesJson}
+										title="Arbeitsproben aus JSON importieren"
+									>
+										JSON importieren
+									</button>
+								</div>
+							</div>
+							{#if samplesJsonError}
+								<p class="text-xs text-red-400">{samplesJsonError}</p>
+							{/if}
 							<textarea
 								bind:value={staticData.samplesDisclaimer}
 								rows="6"
@@ -3169,7 +3419,28 @@
 				{:else if staticTab === "pdf"}
 					<div class="space-y-4 max-w-5xl">
 						<div class="{cardCls} space-y-2">
-							<h4 class={hCls}>Zusätzliche PDFs</h4>
+							<div class="flex items-center justify-between">
+								<h4 class={hCls}>Zusätzliche PDFs</h4>
+								<div class="flex gap-2">
+									<button
+										class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors"
+										onclick={copyDocumentsJson}
+										title="Dokumentliste als JSON kopieren"
+									>
+										{docsJsonCopied ? "✓ Kopiert!" : "JSON kopieren"}
+									</button>
+									<button
+										class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors"
+										onclick={importDocumentsJson}
+										title="Dokumentliste aus JSON importieren"
+									>
+										JSON importieren
+									</button>
+								</div>
+							</div>
+							{#if docsJsonError}
+								<p class="text-xs text-red-400">{docsJsonError}</p>
+							{/if}
 							<p class="text-[11px] text-slate-400 leading-relaxed">
 								Zeugnisse, Nachweise, Zertifikate. Diese PDFs werden an
 								<strong class="text-slate-300">jede</strong> Bewerbungs-Mail angehängt: in der
@@ -3240,7 +3511,28 @@
 				{:else if staticTab === "erfahrung"}
 					<div class="space-y-4 max-w-5xl">
 						<div class="{cardCls} space-y-2">
-							<h4 class={hCls}>Erfahrung & Kenntnisse</h4>
+							<div class="flex items-center justify-between">
+								<h4 class={hCls}>Erfahrung & Kenntnisse</h4>
+								<div class="flex gap-2">
+									<button
+										class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors"
+										onclick={copyStaticJson}
+										title="Erfahrung als JSON kopieren"
+									>
+										{staticJsonCopied ? "✓ Kopiert!" : "JSON kopieren"}
+									</button>
+									<button
+										class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors"
+										onclick={importStaticJson}
+										title="Erfahrung aus JSON importieren"
+									>
+										JSON importieren
+									</button>
+								</div>
+							</div>
+							{#if staticJsonError}
+								<p class="text-xs text-red-400">{staticJsonError}</p>
+							{/if}
 							<textarea
 								bind:value={staticData.erfahrung}
 								rows="20"
@@ -3259,34 +3551,83 @@
 				{:else if staticTab === "stammdaten"}
 					<div class="space-y-4 max-w-xl">
 						<div class="{cardCls} space-y-4">
-							<h3 class="text-xs font-bold text-slate-100 pb-2 border-b border-[#1e293b]">
-								Stammdaten (Singleton, einmalig)
-							</h3>
+							<div class="flex items-center justify-between pb-2 border-b border-[#1e293b]">
+								<h3 class="text-xs font-bold text-slate-100">
+									{shared.language === "en" ? "Personal Data" : "Stammdaten"}
+								</h3>
+								<select
+									bind:value={shared.language}
+									class="{inputCls} text-xs py-1 px-2"
+									style="width: auto; min-width: 8rem;"
+									onchange={() => { scheduleSave(); render(); }}
+								>
+									<option value="de">Deutsch</option>
+									<option value="en">English</option>
+								</select>
+							</div>
+
+							<!-- Personalia -->
 							<div class="grid grid-cols-2 gap-3">
 								<div>
 									<span class={labelCls}>Vorname</span>
 									<input bind:value={shared.firstname} class={inputCls} />
 								</div>
 								<div>
+									<span class={labelCls}>First Name</span>
+									<input bind:value={shared.firstnameEn} class={inputCls} placeholder="(optional)" />
+								</div>
+								<div>
 									<span class={labelCls}>Nachname</span>
 									<input bind:value={shared.lastname} class={inputCls} />
 								</div>
-								<div class="col-span-2">
+								<div>
+									<span class={labelCls}>Last Name</span>
+									<input bind:value={shared.lastnameEn} class={inputCls} placeholder="(optional)" />
+								</div>
+							</div>
+
+							<!-- Contact -->
+							<div class="grid grid-cols-2 gap-3 pt-2 border-t border-[#1e293b]">
+								<div>
 									<span class={labelCls}>E-Mail</span>
 									<input bind:value={shared.email} class={inputCls} />
 								</div>
-								<div class="col-span-2">
+								<div>
+									<span class={labelCls}>E-Mail (EN)</span>
+									<input bind:value={shared.emailEn} class={inputCls} placeholder="(optional)" />
+								</div>
+								<div>
 									<span class={labelCls}>Telefon</span>
 									<input bind:value={shared.phone} class={inputCls} />
 								</div>
-								<div class="col-span-2">
+								<div>
+									<span class={labelCls}>Phone (EN)</span>
+									<input bind:value={shared.phoneEn} class={inputCls} placeholder="(optional)" />
+								</div>
+								<div class="col-span-1">
 									<span class={labelCls}>Adresse</span>
 									<input bind:value={shared.address} class={inputCls} />
 								</div>
-								<div class="col-span-2">
+								<div class="col-span-1">
+									<span class={labelCls}>Address (EN)</span>
+									<input bind:value={shared.addressEn} class={inputCls} placeholder="(optional)" />
+								</div>
+							</div>
+
+							<!-- Signature -->
+							<div class="grid grid-cols-2 gap-3 pt-2 border-t border-[#1e293b]">
+								<div>
 									<span class={labelCls}>Signatur-Name</span>
 									<input bind:value={shared.signatureName} class={inputCls} />
 								</div>
+								<div>
+									<span class={labelCls}>Signature Name (EN)</span>
+									<input bind:value={shared.signatureNameEn} class={inputCls} placeholder="(optional)" />
+								</div>
+							</div>
+
+							<!-- Salary & Start -->
+							<div class="grid grid-cols-1 gap-3 pt-2 border-t border-[#1e293b]">
 								<div class="col-span-2">
 									<span class={labelCls}>Gehaltsvorstellung (bei 40h/Woche)</span>
 									<input
@@ -3333,6 +3674,27 @@
 									</p>
 								</div>
 							</div>
+
+							<!-- JSON Export/Import for Stammdaten -->
+							<div class="flex gap-2 pt-3 border-t border-[#1e293b]">
+								<button
+									class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors"
+									onclick={copySharedJson}
+									title="Stammdaten als JSON kopieren"
+								>
+									{sharedJsonCopied ? "✓ Kopiert!" : "JSON kopieren"}
+								</button>
+								<button
+									class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors"
+									onclick={importSharedJson}
+									title="Stammdaten aus JSON importieren"
+								>
+									JSON importieren
+								</button>
+							</div>
+							{#if sharedJsonError}
+								<p class="text-xs text-red-400">{sharedJsonError}</p>
+							{/if}
 						</div>
 					</div>
 				{/if}

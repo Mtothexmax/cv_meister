@@ -29,11 +29,12 @@ import type { CvData, CvEntry, CvSection } from "./cv.js";
 import { normalizeCv, isToggleable, skillLines, skillValueKey, toggleableEntries } from "./cv.js";
 import { SAMPLE_COMPRESSION_INFO } from "./images.js";
 import type { ExtraDocument, StaticData } from "./static.js";
+import type { Language } from "./i18n.js";
 
 export const JSON_FORMAT = "cv-meister";
 export const JSON_VERSION = 3;
 
-export type JsonArt = "bewerbung" | "arbeitsbereich" | "lebenslauf";
+export type JsonArt = "bewerbung" | "arbeitsbereich" | "lebenslauf" | "stammdaten";
 
 /**
  * One value as the UI presents it. Only `value` is read back on import.
@@ -265,7 +266,12 @@ export interface CvDoc extends Envelope {
 	lebenslauf: CvNode;
 }
 
-export type AnyDoc = ApplicationDoc | WorkspaceDoc | CvDoc;
+export interface SharedDoc extends Envelope {
+	art: "stammdaten";
+	stammdaten: Record<string, JsonField<unknown>>;
+}
+
+export type AnyDoc = ApplicationDoc | WorkspaceDoc | CvDoc | SharedDoc;
 
 // ---------------------------------------------------------------------------
 // field helpers
@@ -512,6 +518,13 @@ export function sharedNode(shared: SharedData): Record<string, JsonField<string>
 		),
 		einstiegDatum: field("Einstieg als Datum (YYYY-MM-DD)", shared.einstiegDatum),
 		einstiegMonate: field("Einstieg in Monaten", shared.einstiegMonate),
+		sprache: field("Sprache", shared.language, '"de" = Deutsch, "en" = Englisch'),
+		vornameEn: field("Vorname (Englisch)", shared.firstnameEn, "Wird verwendet, wenn Sprache = en."),
+		nachnameEn: field("Nachname (Englisch)", shared.lastnameEn),
+		emailEn: field("E-Mail (Englisch)", shared.emailEn),
+		telefonEn: field("Telefon (Englisch)", shared.phoneEn),
+		adresseEn: field("Adresse (Englisch)", shared.addressEn),
+		signaturNameEn: field("Signatur-Name (Englisch)", shared.signatureNameEn),
 	};
 }
 
@@ -901,7 +914,7 @@ export function readArt(v: unknown): JsonArt | null {
 	return isAppJson(v) ? (v as AnyDoc).art : null;
 }
 
-function readSharedNode(node: unknown, fallback: SharedData): SharedData {
+export function readSharedNode(node: unknown, fallback: SharedData): SharedData {
 	if (!node || typeof node !== "object") return fallback;
 	const n = node as Record<string, unknown>;
 	return {
@@ -916,6 +929,13 @@ function readSharedNode(node: unknown, fallback: SharedData): SharedData {
 		einstiegArt: readOneOf(n.einstiegArt, ["datum", "monate"] as const, fallback.einstiegArt),
 		einstiegDatum: readString(n.einstiegDatum, fallback.einstiegDatum),
 		einstiegMonate: readString(n.einstiegMonate, fallback.einstiegMonate),
+		language: readOneOf(n.sprache, ["de", "en"] as const, fallback.language),
+		firstnameEn: readString(n.vornameEn, fallback.firstnameEn),
+		lastnameEn: readString(n.nachnameEn, fallback.lastnameEn),
+		emailEn: readString(n.emailEn, fallback.emailEn),
+		phoneEn: readString(n.telefonEn, fallback.phoneEn),
+		addressEn: readString(n.adresseEn, fallback.addressEn),
+		signatureNameEn: readString(n.signaturNameEn, fallback.signatureNameEn),
 	};
 }
 
