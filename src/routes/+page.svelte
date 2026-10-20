@@ -3316,6 +3316,20 @@
 						{/if}
 					</div>
 				{:else}
+					<div class="flex items-center justify-between mb-2">
+						<div class="text-xs text-slate-500">
+							{shared.language === "en" ? "Language" : "Sprache"}
+						</div>
+						<select
+							bind:value={shared.language}
+							class="{inputCls} text-xs py-1 px-2"
+							style="width: auto; min-width: 8rem;"
+							onchange={() => { scheduleSave(); render(); }}
+						>
+							<option value="de">Deutsch</option>
+							<option value="en">English</option>
+						</select>
+					</div>
 					<nav
 						class="inline-flex max-w-full gap-1 rounded-lg border border-[#1e293b] bg-[#0e1422] p-1 overflow-x-auto scroll-dark"
 					>
@@ -3551,20 +3565,9 @@
 				{:else if staticTab === "stammdaten"}
 					<div class="space-y-4 max-w-xl">
 						<div class="{cardCls} space-y-4">
-							<div class="flex items-center justify-between pb-2 border-b border-[#1e293b]">
-								<h3 class="text-xs font-bold text-slate-100">
-									{shared.language === "en" ? "Personal Data" : "Stammdaten"}
-								</h3>
-								<select
-									bind:value={shared.language}
-									class="{inputCls} text-xs py-1 px-2"
-									style="width: auto; min-width: 8rem;"
-									onchange={() => { scheduleSave(); render(); }}
-								>
-									<option value="de">Deutsch</option>
-									<option value="en">English</option>
-								</select>
-							</div>
+							<h3 class="text-xs font-bold text-slate-100 pb-2 border-b border-[#1e293b]">
+								{shared.language === "en" ? "Personal Data" : "Stammdaten"}
+							</h3>
 
 							<!-- Personalia -->
 							{#if shared.language === "de"}
