@@ -380,16 +380,16 @@ export function buildCvSource(
 #show: resume.with(
   accent-color: rgb(heading-color),
   author: (
-    firstname: ${typstString(loc(shared, "firstname"))},
-    lastname: ${typstString(loc(shared, "lastname"))},
-    email: ${typstString(loc(shared, "email"))},
-    phone: ${typstString(loc(shared, "phone"))},
-    address: ${typstString(loc(shared, "address"))},
+    firstname: ${typstString(loc(shared, "firstname", job.language))},
+    lastname: ${typstString(loc(shared, "lastname", job.language))},
+    email: ${typstString(loc(shared, "email", job.language))},
+    phone: ${typstString(loc(shared, "phone", job.language))},
+    address: ${typstString(loc(shared, "address", job.language))},
     positions: (),
   ),
   profile-picture: ${profile},
   date: ${typstDate(todayISO())},
-  language: "de",
+  language: ${typstString(job.language)},
   colored-headers: true,
   show-footer: false,
   show-address-icon: true,
@@ -401,5 +401,6 @@ ${data.sections.map((s) => renderSection(s, job)).filter((x): x is string => x !
 
 function renderFuehrerschein(data: CvData, job: JobData): string {
 	if (!job.fuehrerschein || !data.fuehrerschein.trim()) return "";
-	return `\n= Führerschein\n\n#resume-item[\n${richInline(data.fuehrerschein.trim())}\n]`;
+	const heading = job.language === "en" ? "Driver's License" : "Führerschein";
+	return `\n= ${heading}\n\n#resume-item[\n${richInline(data.fuehrerschein.trim())}\n]`;
 }

@@ -4,6 +4,8 @@
  * company first and to output only plain flowing text (~800 chars).
  */
 
+import type { Language } from "./i18n.js";
+
 export interface MotivationPromptInput {
 	firma: string;
 	rolle: string;
@@ -49,37 +51,52 @@ export interface CoverPromptInput {
 	gehalt: string;
 	/** Earliest start (already formatted, e.g. "ab 01.08.2026"). */
 	einstieg: string;
+	/**
+	 * Language of the application being drafted. A German prompt around English
+	 * applicant data yields German prose, which then lands in an application
+	 * that is otherwise English — the instruction has to match the output.
+	 */
+	language?: Language;
 }
 
 export function buildCoverPrompt(input: CoverPromptInput): string {
-	const pick = (v: string) => (v.trim() ? v.trim() : "(keine Angaben)");
+	const en = input.language === "en";
+	const pick = (v: string) => (v.trim() ? v.trim() : en ? "(no information)" : "(keine Angaben)");
 	return [
-		"Du hilfst mir bei einer Bewerbung als Motivationsschreiben-Autor.",
+		en
+			? "You are helping me write a cover letter."
+			: "Du hilfst mir bei einer Bewerbung als Motivationsschreiben-Autor.",
 		"",
-		`Firma: ${pick(input.firma)}`,
-		`Stelle/Rolle: ${pick(input.rolle)}`,
-		`Gehaltsvorstellung: ${pick(input.gehalt)}`,
-		`Frühestmöglicher Einstieg: ${pick(input.einstieg)}`,
+		`${en ? "Company" : "Firma"}: ${pick(input.firma)}`,
+		`${en ? "Role / position" : "Stelle/Rolle"}: ${pick(input.rolle)}`,
+		`${en ? "Salary expectation" : "Gehaltsvorstellung"}: ${pick(input.gehalt)}`,
+		`${en ? "Earliest possible start" : "Frühestmöglicher Einstieg"}: ${pick(input.einstieg)}`,
 		"",
-		"Stellenausschreibung:",
+		en ? "Job advertisement:" : "Stellenausschreibung:",
 		pick(input.adText),
 		"",
-		"Meine Erfahrung:",
+		en ? "My experience:" : "Meine Erfahrung:",
 		pick(input.erfahrung),
 		"",
-		"Das macht mir Spaß:",
+		en ? "What I enjoy:" : "Das macht mir Spaß:",
 		pick(input.antrieb),
 		"",
-		"Warum ich bei genau dieser Firma arbeiten will:",
+		en ? "Why I want to work at exactly this company:" : "Warum ich bei genau dieser Firma arbeiten will:",
 		pick(input.motivation),
 		"",
-		"Recherchiere zuerst selbstständig die Firma (Webseite, Produkte, Mission).",
-		"Schreibe danach AUSSCHLIESSLICH den Fließtext des Motivationsschreibens (ohne Anrede, ohne Grußformel — nur den Mittelteil).",
+		en
+			? "Research the company yourself first (website, products, mission)."
+			: "Recherchiere zuerst selbstständig die Firma (Webseite, Produkte, Mission).",
+		en
+			? "Then write ONLY the flowing text of the cover letter (no salutation, no closing — just the middle part)."
+			: "Schreibe danach AUSSCHLIESSLICH den Fließtext des Motivationsschreibens (ohne Anrede, ohne Grußformel — nur den Mittelteil).",
 		"",
-		"Regeln für deine Antwort:",
-		"- nur Fließtext, ca. 2000 Zeichen",
-		"- keine Formatierung (kein Markdown, keine Aufzählung, keine Überschriften)",
-		"- gib nichts anderes aus als diesen Text",
+		en ? "Rules for your answer:" : "Regeln für deine Antwort:",
+		en ? "- flowing prose only, approx. 2000 characters" : "- nur Fließtext, ca. 2000 Zeichen",
+		en
+			? "- no formatting (no markdown, no bullet lists, no headings)"
+			: "- keine Formatierung (kein Markdown, keine Aufzählung, keine Überschriften)",
+		en ? "- output nothing but this text" : "- gib nichts anderes aus als diesen Text",
 	].join("\n");
 }
 

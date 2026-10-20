@@ -42,9 +42,17 @@ export interface SharedData {
  * Returns the localized value of a shared field.
  * When language is "en" and an English variant exists, it wins;
  * otherwise the German default is returned.
+ *
+ * `lang` overrides `shared.language`: an application carries its own language,
+ * and its documents must use the matching name/contact data even when the
+ * Stammdaten editor is currently showing the other language.
  */
-export function loc(shared: SharedData, key: "firstname" | "lastname" | "email" | "phone" | "address" | "signatureName"): string {
-	if (shared.language === "en") {
+export function loc(
+	shared: SharedData,
+	key: "firstname" | "lastname" | "email" | "phone" | "address" | "signatureName",
+	lang: Language = shared.language,
+): string {
+	if (lang === "en") {
 		const en = shared[`${key}En` as keyof SharedData] as string;
 		if (en && en.trim()) return en;
 	}

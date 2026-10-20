@@ -174,10 +174,18 @@ export interface ApplicationNode {
 		stellenausschreibung: JsonField<string>;
 		motivation: JsonField<string>;
 		status: JsonField<JobStatus>;
+		/**
+		 * Language of this application's letter and CV ("de" | "en").
+		 * Independent of the Stammdaten editor's language.
+		 */
+		sprache: JsonField<Language>;
 	};
 	anschreiben: {
 		text: JsonField<string>;
 		grussformel: JsonField<string>;
+		/** English body, used when `felder.sprache` is "en". */
+		textEn: JsonField<string>;
+		grussformelEn: JsonField<string>;
 	};
 	/**
 	 * ONLY the switch state of THIS application — the CV content itself is
@@ -349,6 +357,7 @@ function readFileRef(node: unknown): ResolvedFileRef {
 }
 
 const ANREDE: readonly Anrede[] = ["frau", "herr", "divers"];
+const LANGUAGES: readonly Language[] = ["de", "en"];
 
 // ---------------------------------------------------------------------------
 // export — building the document
@@ -703,10 +712,25 @@ function applicationNode(input: ApplicationInput, withImages = false) {
 				"Nur Notizen für die KI — wird in kein PDF gerendert.",
 			),
 			status: field("Status", job.status, "Entwurf | In Bearbeitung | Verschickt"),
+			sprache: field(
+				"Sprache",
+				job.language,
+				'"de" = Deutsch, "en" = Englisch. Gilt für Anschreiben UND Lebenslauf dieser Bewerbung — beide Dokumente wechseln gemeinsam. Unabhängig von der Sprache in den Stammdaten.',
+			),
 		},
 		anschreiben: {
 			text: field("Text", job.letter.body, "Leerzeile = neuer Absatz"),
 			grussformel: field("Grußformel", job.letter.closing),
+			textEn: field(
+				"Text (Englisch)",
+				job.letter.bodyEn,
+				'Genau dieses Feld wird verwendet, wenn felder.sprache.value = "en" ist. Leer = es fällt der deutsche Text heraus.',
+			),
+			grussformelEn: field(
+				"Grußformel (Englisch)",
+				job.letter.closingEn,
+				'Genau dieses Feld wird verwendet, wenn felder.sprache.value = "en" ist.',
+			),
 		},
 		auswahl: {
 			hinweis: AUSWAHL_HINWEIS,
@@ -1054,9 +1078,12 @@ export function readApplicationNode(node: unknown, fallbackJobId: string): Parse
 		adText: readString(felder.stellenausschreibung),
 		motivation: readString(felder.motivation),
 		status: readOneOf(felder.status, JOB_STATUSES, "Entwurf"),
+		language: readOneOf(felder.sprache, LANGUAGES, "de"),
 		letter: {
 			body: readString(anschreiben.text),
 			closing: readString(anschreiben.grussformel, "Mit freundlichen Grüßen"),
+			bodyEn: readString(anschreiben.textEn),
+			closingEn: readString(anschreiben.grussformelEn, "Sincerely"),
 		},
 		hiddenSkillValues: [],
 		hiddenSampleIds: [],

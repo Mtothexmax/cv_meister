@@ -6,6 +6,7 @@
 
 import type { CvData } from "./cv.js";
 import { DEFAULT_LETTER, type LetterData } from "./letter.js";
+import type { Language } from "./i18n.js";
 
 export type JobStatus = "Entwurf" | "In Bearbeitung" | "Verschickt";
 
@@ -45,6 +46,17 @@ export interface JobData {
 
 	/** Accent color as "#rrggbb", one per job. */
 	accentColor: string;
+
+	/**
+	 * Language of *this application's* documents (letter + CV).
+	 *
+	 * Separate from `SharedData.language`: the Stammdaten editor shows one
+	 * language at a time, but a single application may well have to go out in
+	 * the other one. Both documents of an application always agree — an
+	 * English letter next to a German CV is exactly the kind of mistake a
+	 * recipient notices first.
+	 */
+	language: Language;
 
 	/** Show the driver's license section in this job's CV. */
 	fuehrerschein: boolean;
@@ -116,6 +128,7 @@ export function createJob(partial: Partial<JobData> = {}): JobData {
 		status: "Entwurf",
 		rolle: "",
 		accentColor: "#4d3e1d",
+		language: "de",
 		fuehrerschein: false,
 		// On by default: a full-resolution phone photo is the one thing that
 		// reliably blows up an application PDF, and nobody looks at it at that

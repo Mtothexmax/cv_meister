@@ -20,11 +20,24 @@ export interface WorkSample {
 import type { SharedData } from "./shared.js";
 import { loc } from "./shared.js";
 import type { JobData } from "./job.js";
+import type { Language } from "./i18n.js";
 
 export interface LetterData {
 	/** Body text; blank lines separate paragraphs. */
 	body: string;
 	closing: string;
+
+	/**
+	 * English body. Only used when the application's language is "en".
+	 *
+	 * Deliberately a separate field instead of a translation: an English
+	 * application is not the German one run through a translator — it is
+	 * written again. Keeping both means switching the language never destroys
+	 * the other version (same rule as the Stammdaten fields).
+	 */
+	bodyEn: string;
+	/** English closing, e.g. "Sincerely". */
+	closingEn: string;
 }
 
 export const DEFAULT_LETTER: LetterData = {
@@ -32,7 +45,20 @@ export const DEFAULT_LETTER: LetterData = {
 
 Bitte ersetzen Sie diesen Text durch Ihr eigenes Motivationsschreiben. Jede Leerzeile beginnt einen neuen Absatz.`,
 	closing: "Mit freundlichen Grüßen",
+	bodyEn: "",
+	closingEn: "Sincerely",
 };
+
+/** Body/closing of a letter in the given language, with a DE fallback. */
+export function letterText(data: LetterData, lang: Language): { body: string; closing: string } {
+	if (lang === "en") {
+		return {
+			body: data.bodyEn.trim() ? data.bodyEn : data.body,
+			closing: data.closingEn.trim() ? data.closingEn : data.closing,
+		};
+	}
+	return { body: data.body, closing: data.closing };
+}
 
 /** Global work-sample pool (edited once, toggled per job). Starts empty. */
 export const DEFAULT_SAMPLES: WorkSample[] = [];
@@ -104,10 +130,11 @@ export function typstDate(iso: string): string {
 }
 
 /**
- * The letter heading is always "Bewerbung als <Rolle>".
+ * The letter heading: "Bewerbung als <Rolle>" / "Application for <role>".
  */
-export function bewerbungTitel(rolle: string): string {
+export function bewerbungTitel(rolle: string, lang: Language = "de"): string {
 	const r = rolle.trim();
+	if (lang === "en") return r ? `Application for ${r}` : "Application";
 	return r ? `Bewerbung als ${r}` : "Bewerbung";
 }
 
@@ -133,7 +160,9 @@ export function cleanRole(rolle: string): string {
 export function contactSurname(raw: string): string {
 	const words = raw
 		.trim()
-		.replace(/^(Herrn?|Frau)\s+/i, "")
+		// German and English honorifics alike, so a contact typed as
+		// "Ms. Jane Doe" greets "Dear Ms. Doe" and not "Dear Ms. Ms.".
+		.replace(/^(Herrn?|Frau|Mr\.?|Ms\.?|Mrs\.?)\s+/i, "")
 		.replace(/\([^)]*\)/g, " ")
 		.trim()
 		.split(/\s+/)
@@ -143,19 +172,27 @@ export function contactSurname(raw: string): string {
 }
 
 /**
- * Personal salutation from contact + gender toggle ("Sehr geehrte Frau X," /
- * "Sehr geehrter Herr X," / neutral "Guten Tag X,"). Only the surname is used —
- * see `contactSurname()`. Fallback when no contact: "Sehr geehrte
- * MitarbeiterInnen von [Firmenname]," — the firm name is used verbatim,
- * deliberately without quotation marks. Returns null only when neither contact
- * nor firm name are available.
+ * Personal salutation from contact + gender toggle.
+ *
+ * German: "Sehr geehrte Frau X," / "Sehr geehrter Herr X," / "Guten Tag X,"
+ * English: "Dear Ms. X," / "Dear Mr. X," / "Dear X,"
+ *
+ * Only the surname is used — see `contactSurname()`. Fallback when no contact
+ * is the company's hiring team, in the application's own language. Returns
+ * null only when neither contact nor firm name are available.
  */
 export function contactGreeting(job: JobData): string | null {
 	const contactName = contactSurname(job.ansprechpartner);
+	const isEn = job.language === "en";
 	if (!contactName) {
 		const firma = job.firma.trim();
-		if (firma) return `Sehr geehrte MitarbeiterInnen von ${firma},`;
-		return null;
+		if (!firma) return null;
+		return isEn ? `Dear Hiring Team at ${firma},` : `Sehr geehrte MitarbeiterInnen von ${firma},`;
+	}
+	if (isEn) {
+		if (job.anrede === "herr") return `Dear Mr. ${contactName},`;
+		if (job.anrede === "divers") return `Dear ${contactName},`;
+		return `Dear Ms. ${contactName},`;
 	}
 	if (job.anrede === "herr") return `Sehr geehrter Herr ${contactName},`;
 	if (job.anrede === "divers") return `Guten Tag ${contactName},`;
@@ -176,7 +213,8 @@ export function composeMailBody(
 	if (greet) parts.push(greet);
 	if (job.emailText.trim()) parts.push(job.emailText.trim());
 	// Closing + name belong directly together (single line break, no blank line).
-	const signoff = [letter.closing.trim(), loc(shared, "signatureName").trim()]
+	const text = letterText(letter, job.language);
+	const signoff = [text.closing.trim(), loc(shared, "signatureName", job.language).trim()]
 		.filter(Boolean)
 		.join("\n");
 	if (signoff) parts.push(signoff);
@@ -200,7 +238,7 @@ export function safeAccentColor(value: string): string {
 	return /^#[0-9a-fA-F]{6}$/.test(value.trim()) ? value.trim() : "#4d3e1d";
 }
 
-function renderWorkSamples(samples: WorkSample[], disclaimer: string): string {
+function renderWorkSamples(samples: WorkSample[], disclaimer: string, lang: Language): string {
 	if (samples.length === 0) return "";
 	// Each cell is wrapped in `[...]` so the `#block` call sits in content
 	// (like the reference letter does). A bare `#block` directly inside the
@@ -230,7 +268,9 @@ function renderWorkSamples(samples: WorkSample[], disclaimer: string): string {
 	return `
 #pagebreak()
 
-#text(weight: "bold", fill: heading-color, size: 12pt)[Ausgewählte Arbeitsproben und Freizeitprojekte]
+#text(weight: "bold", fill: heading-color, size: 12pt)[${typstContent(
+		lang === "en" ? "Selected work samples and side projects" : "Ausgewählte Arbeitsproben und Freizeitprojekte",
+	)}]
 #v(0.45em)
 ${note}#set par(justify: false, leading: 0.55em)
 #grid(
@@ -270,6 +310,7 @@ export function buildLetterSource(
 	const roleLine = cleanRole(job.rolle);
 	const greetRaw = contactGreeting(job);
 	const greetingBlock = greetRaw ? `${typstContent(greetRaw)}\n\n#v(0.75em)\n` : "";
+	const text = letterText(data, job.language);
 
 	// This is inserted into the code arguments of `#stack(...)`, so no `#` prefix.
 	const signature = opts.signatureFile
@@ -289,16 +330,16 @@ export function buildLetterSource(
     text()[ ]
   },
   author: (
-    firstname: ${typstString(loc(shared, "firstname"))},
-    lastname: ${typstString(loc(shared, "lastname"))},
-    email: ${typstString(loc(shared, "email"))},
-    phone: ${typstString(loc(shared, "phone"))},
-    address: ${typstString(loc(shared, "address"))},
+    firstname: ${typstString(loc(shared, "firstname", job.language))},
+    lastname: ${typstString(loc(shared, "lastname", job.language))},
+    email: ${typstString(loc(shared, "email", job.language))},
+    phone: ${typstString(loc(shared, "phone", job.language))},
+    address: ${typstString(loc(shared, "address", job.language))},
     positions: (${roleLine ? `${typstString(roleLine)},` : ""}),
   ),
   profile-picture: box(width: 0pt, height: 0pt),
   accent-color: rgb(heading-color),
-  language: "de",
+  language: ${typstString(job.language)},
   show-footer: false,
 )
 
@@ -312,23 +353,23 @@ ${logo}${recipient}#hiring-entity-info(
   date: ${typstDate(todayISO())}
 )
 
-#letter-heading(job-position: ${typstString(bewerbungTitel(job.rolle))})
+#letter-heading(job-position: ${typstString(bewerbungTitel(job.rolle, job.language))})
 
 #coverletter-content[
 #set text(size: 9.3pt)
 #set par(justify: true, leading: 0.55em, first-line-indent: 0pt)
 #v(0.25em)
-${greetingBlock}${letterBodyParagraphs(data.body, null)}
+${greetingBlock}${letterBodyParagraphs(text.body, null)}
 
 #v(0.75em)
 #v(0.5em)
 #align(left)[#stack(
   dir: ttb,
   spacing: 0.2em,
-  text[${typstContent(data.closing)}],
+  text[${typstContent(text.closing)}],
   ${signature},
-  text(weight: "bold")[${typstContent(loc(shared, "signatureName"))}],
+  text(weight: "bold")[${typstContent(loc(shared, "signatureName", job.language))}],
 )]
 ]
-${renderWorkSamples(samples, opts.disclaimer ?? "")}`;
+${renderWorkSamples(samples, opts.disclaimer ?? "", job.language)}`;
 }

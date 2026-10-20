@@ -8,7 +8,7 @@
 		compileCv,
 		compileCvPdf,
 	} from "$lib/letterCompiler";
-	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, contactGreeting, safeAccentColor, type LetterData, type WorkSample } from "$lib/letter";
+	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, contactGreeting, letterText, safeAccentColor, type LetterData, type WorkSample } from "$lib/letter";
 	import {
 		DEFAULT_CV,
 		normalizeCv,
@@ -17,7 +17,7 @@
 		type CvSkillGroup,
 		type CvData,
 	} from "$lib/cv";
-	import { DEFAULT_SHARED, einstiegText, nid, type SharedData } from "$lib/shared";
+	import { DEFAULT_SHARED, einstiegText, loc, nid, type SharedData } from "$lib/shared";
 	import {
 		DEFAULT_DOCUMENTS,
 		DEFAULT_STATIC,
@@ -570,6 +570,11 @@
 				jobs = s.jobs as JobData[];
 				for (const j of jobs) {
 					if (!j.letter) j.letter = structuredClone(DEFAULT_LETTER);
+					if (typeof j.letter.bodyEn !== "string") j.letter.bodyEn = "";
+					if (typeof j.letter.closingEn !== "string") j.letter.closingEn = "Sincerely";
+					// Absent in applications saved before the per-application
+					// language: German is what every one of them already says.
+					if (j.language !== "de" && j.language !== "en") j.language = "de";
 					if (!Array.isArray(j.hiddenSkillValues)) j.hiddenSkillValues = [];
 					if (!Array.isArray(j.hiddenSampleIds)) j.hiddenSampleIds = [];
 					if (typeof j.emailText !== "string") j.emailText = "";
@@ -788,16 +793,16 @@
 			preview: {
 				mail: {
 					an: job.email.trim(),
-					betreff: bewerbungTitel(job.rolle),
+					betreff: bewerbungTitel(job.rolle, job.language),
 					text: composeMailBody(shared, job, job.letter),
 					anhaenge: mailAttachments(job).map((a) => a.name),
 				},
-				anschreiben: {
-					anrede: contactGreeting(job),
-					text: job.letter.body,
-					grussformel: job.letter.closing,
-					name: shared.signatureName,
-				},
+			anschreiben: {
+				anrede: contactGreeting(job),
+				text: letterText(job.letter, job.language).body,
+				grussformel: letterText(job.letter, job.language).closing,
+				name: loc(shared, "signatureName", job.language),
+			},
 			},
 		};
 		if (!withBase64) return input;
@@ -974,10 +979,25 @@
 		logoUrlOpen = false;
 	}
 
+	/**
+	 * Name of a single document: "Motivationsschreiben <Vorname Nachname>.pdf" /
+	 * "Cover Letter <Vorname Nachname>.pdf".
+	 *
+	 * Both the heading and the name follow the application's language, and the
+	 * name is the English one when the application is English — a file called
+	 * "Motivationsschreiben Max Mustermann.pdf" next to an all-English letter
+	 * is the wrong impression. `loc` falls back to German when the English
+	 * field is empty, exactly like the documents do.
+	 */
 	function docFilename(kind: "Motivationsschreiben" | "Lebenslauf", job: JobData): string {
+		const lang = job.language;
 		const tag =
-			`${shared.firstname} ${shared.lastname}`.trim() || job.firma.trim() || "dokument";
-		return `${kind} ${tag}.pdf`;
+			`${loc(shared, "firstname", lang)} ${loc(shared, "lastname", lang)}`.trim() ||
+			job.firma.trim() ||
+			"dokument";
+		const heading =
+			lang === "en" ? (kind === "Motivationsschreiben" ? "Cover Letter" : "CV") : kind;
+		return `${heading} ${tag}.pdf`;
 	}
 
 	/**
@@ -990,9 +1010,12 @@
 	 * single documents do.
 	 */
 	function combinedFilename(job: JobData): string {
+		const lang = job.language;
 		const tag =
-			`${shared.firstname} ${shared.lastname}`.trim() || job.firma.trim() || "dokument";
-		return `Bewerbung ${tag}.pdf`;
+			`${loc(shared, "firstname", lang)} ${loc(shared, "lastname", lang)}`.trim() ||
+			job.firma.trim() ||
+			"dokument";
+		return lang === "en" ? `Application ${tag}.pdf` : `Bewerbung ${tag}.pdf`;
 	}
 
 	/**
@@ -1043,6 +1066,7 @@
 			motivation: activeJob.motivation,
 			gehalt: shared.gehalt ? `${shared.gehalt} bei 40h` : "",
 			einstieg: einstiegText(shared),
+			language: activeJob.language,
 		});
 		try {
 			await navigator.clipboard.writeText(prompt);
@@ -1697,7 +1721,7 @@
 			const { buildMimeMessage } = await import("$lib/gmail");
 			const mime = buildMimeMessage(
 				job.email.trim(),
-				bewerbungTitel(job.rolle),
+				bewerbungTitel(job.rolle, job.language),
 				composeMailBody(shared, job, job.letter),
 				attachments,
 			);
@@ -1723,7 +1747,7 @@
 			sendStatus = await sendGmail(
 				token,
 				to,
-				bewerbungTitel(job.rolle),
+				bewerbungTitel(job.rolle, job.language),
 				composeMailBody(shared, job, job.letter),
 				attachments,
 			);
@@ -1751,7 +1775,7 @@
 			if (busy !== key) return;
 			await openDraftInGmail({
 				to: job.email.trim(),
-				subject: bewerbungTitel(job.rolle),
+				subject: bewerbungTitel(job.rolle, job.language),
 				body: composeMailBody(shared, job, job.letter),
 				attachments,
 			});
@@ -2828,7 +2852,7 @@
 											<td class="py-3 px-2 lg:px-4 font-semibold text-slate-100">
 												{j.firma || "Neue Firma"}
 												<span class="block text-[10px] text-blue-400 font-normal"
-													>{j.rolle.trim() ? bewerbungTitel(j.rolle) : "—"}</span
+													>{j.rolle.trim() ? bewerbungTitel(j.rolle, j.language) : "—"}</span
 												>
 											</td>
 											<td class="py-3 px-2 lg:px-4">
@@ -2911,6 +2935,23 @@
 										<option value={s} class="bg-[#0a0f1d] text-slate-200">{s}</option>
 									{/each}
 								</select>
+								<!-- Language of this application's documents. Separate from
+								     the Stammdaten language on purpose: the editor shows one
+								     language at a time, but a single application may have to go
+								     out in the other one. Both of its documents switch together. -->
+								<select
+									bind:value={activeJob.language}
+									onchange={() => {
+										scheduleSave();
+										render();
+									}}
+									title="Sprache dieser Bewerbung — gilt für Anschreiben und Lebenslauf"
+									aria-label="Sprache der Bewerbung"
+									class="px-2 py-1 rounded border text-[11px] font-mono focus:outline-none focus:border-blue-500 bg-[#0a0f1d] text-slate-200 border-[#1e293b]"
+								>
+									<option value="de">Deutsch</option>
+									<option value="en">English</option>
+								</select>
 								{#if jobs.length > 1}
 									<button
 										onclick={() => removeJob(activeJob.id)}
@@ -2967,7 +3008,7 @@
 											<h3 class="text-xs font-bold text-slate-100">
 												{activeJob.firma || "Neue Firma"}
 											</h3>
-											<p class="text-[11px] text-blue-400">{bewerbungTitel(activeJob.rolle)}</p>
+											<p class="text-[11px] text-blue-400">{bewerbungTitel(activeJob.rolle, activeJob.language)}</p>
 										</div>
 									</div>
 									<div class="grid grid-cols-2 gap-3">
@@ -3156,8 +3197,9 @@
 									</div>
 								</div>
 
-								<div class="{cardCls} space-y-3">
-									<h4 class={hCls}>Motivationsschreiben</h4>
+							<div class="{cardCls} space-y-3">
+								<h4 class={hCls}>Motivationsschreiben</h4>
+								{#if activeJob.language === "de"}
 									<div>
 										<span class="flex items-center justify-between gap-2">
 											<span class={labelCls}>Text (Leerzeile = neuer Absatz)</span>
@@ -3181,7 +3223,43 @@
 										<span class={labelCls}>Grußformel</span>
 										<input bind:value={activeJob.letter.closing} class={inputCls} />
 									</div>
-								</div>
+								{:else}
+									<div>
+										<span class="flex items-center justify-between gap-2">
+											<span class={labelCls}>Text (Leerzeile = neuer Absatz)</span>
+											<button
+												onclick={copyCoverPrompt}
+												title="Prompt für LLM kopieren"
+												class="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition shrink-0"
+											>
+												<span class="material-symbols-outlined text-lg leading-none"
+													>{coverCopied ? "check" : "content_copy"}</span
+												>
+											</button>
+										</span>
+										<textarea
+											bind:value={activeJob.letter.bodyEn}
+											rows="12"
+											placeholder="Write the cover letter in English — blank lines start a new paragraph."
+											class="{inputCls} font-mono leading-relaxed resize-y"
+										></textarea>
+										{#if !activeJob.letter.bodyEn.trim()}
+											<p class="text-[10px] text-amber-500/90 leading-relaxed mt-1">
+												Sobald hier Text steht, wird er statt des deutschen verwendet. Solange das
+												Feld leer ist, erscheint der deutsche Text im PDF.
+											</p>
+										{/if}
+									</div>
+									<div>
+										<span class={labelCls}>Closing</span>
+										<input
+											bind:value={activeJob.letter.closingEn}
+											placeholder="Sincerely"
+											class={inputCls}
+										/>
+									</div>
+								{/if}
+							</div>
 
 								<div class="{cardCls} space-y-3">
 									<h4 class={hCls}>Arbeitsproben (für diese Bewerbung)</h4>
@@ -3778,7 +3856,7 @@
 						<div class="text-xs text-neutral-500">
 							Betreff:
 							<span class="text-neutral-900 font-medium"
-								>{bewerbungTitel(activeJob.rolle)}</span
+								>{bewerbungTitel(activeJob.rolle, activeJob.language)}</span
 							>
 						</div>
 						<hr class="border-neutral-200" />
