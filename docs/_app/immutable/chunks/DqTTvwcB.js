@@ -1,1 +1,0 @@
-import{o as e}from"../nodes/2.BStmuLv7.js";export{e as buildMimeMessage};
