@@ -11,7 +11,18 @@ export interface WorkSample {
 	id?: string;
 	title: string;
 	description: string;
-	/** Optional external link shown under the description. */
+	/**
+	 * English title. A separate field, not a translation — same rule as the
+	 * Stammdaten: an English application is not the German one run through a
+	 * translator, so both versions are kept and switching never destroys one.
+	 */
+	titleEn: string;
+	/** English description. Empty falls back to the German text. */
+	descriptionEn: string;
+	/**
+	 * Optional external link shown under the description. Deliberately NOT
+	 * split per language: it is a URL, and one address serves both versions.
+	 */
 	link?: string;
 	/** File name of a pre-uploaded image in the virtual project, e.g. "sample-1.png". */
 	image?: string;
@@ -62,6 +73,23 @@ export function letterText(data: LetterData, lang: Language): { body: string; cl
 
 /** Global work-sample pool (edited once, toggled per job). Starts empty. */
 export const DEFAULT_SAMPLES: WorkSample[] = [];
+
+/**
+ * A work sample's texts in the requested language, falling back to German
+ * while the English field is still empty.
+ *
+ * The image and the link are shared: a screenshot and a URL say the same thing
+ * in both languages, so only the prose is held twice.
+ */
+export function sampleText(s: WorkSample, lang: Language): { title: string; description: string } {
+	if (lang === "en") {
+		return {
+			title: s.titleEn?.trim() ? s.titleEn : s.title,
+			description: s.descriptionEn?.trim() ? s.descriptionEn : s.description,
+		};
+	}
+	return { title: s.title, description: s.description };
+}
 
 /** Escapes a plain string for use inside a Typst string literal. */
 export function typstString(value: string): string {
@@ -246,12 +274,13 @@ function renderWorkSamples(samples: WorkSample[], disclaimer: string, lang: Lang
 	// "the character `#` is not valid in code".
 	const blocks = samples
 		.map((s) => {
+			const text = sampleText(s, lang);
 			const lines = [
 				`  [#block(breakable: false)[`,
 				s.image ? `    #image("${s.image}", width: 100%)` : null,
-				`    #text(weight: "bold", size: 8pt)[${typstContent(s.title)}]`,
+				`    #text(weight: "bold", size: 8pt)[${typstContent(text.title)}]`,
 				`    #linebreak()`,
-				`    #text(size: 7pt)[${typstContent(s.description)}]`,
+				`    #text(size: 7pt)[${typstContent(text.description)}]`,
 				s.link
 					? `    #linebreak()\n    #link(${typstString(s.link)})[#text(size: 7pt)[${typstContent(s.link)}]]`
 					: null,

@@ -23,6 +23,7 @@
  */
 
 import { JOB_STATUSES, type Anrede, type JobData, type JobStatus } from "./job.js";
+import { sampleText } from "./letter.js";
 import type { LetterData, WorkSample } from "./letter.js";
 import type { SharedData } from "./shared.js";
 import type { CvData, CvEntry, CvSection } from "./cv.js";
@@ -474,7 +475,17 @@ function sampleNodes(
 		}
 		return {
 			titel: field("Titel", s.title),
+			titelEn: field(
+				"Titel (Englisch)",
+				s.titleEn ?? "",
+				"Eigener Text, keine Kopie — gilt, wenn die Bewerbung auf Englisch läuft. Leer = deutsche Fassung.",
+			),
 			beschreibung: field("Beschreibung", s.description),
+			beschreibungEn: field(
+				"Beschreibung (Englisch)",
+				s.descriptionEn ?? "",
+				"Eigener Text, keine Kopie — gilt, wenn die Bewerbung auf Englisch läuft. Leer = deutsche Fassung.",
+			),
 			link: field("Link (optional)", s.link ?? ""),
 			bild: ref,
 		};
@@ -617,7 +628,9 @@ export function filterAsText(
 		),
 		hiddenSampleTitles: samples
 			.filter((s) => s.id && job.hiddenSampleIds.includes(s.id))
-			.map((s) => s.title),
+			// The title of the application's language — the same instance the
+			// filter is written for, so the round trip matches.
+			.map((s) => sampleText(s, job.language).title),
 	};
 }
 
@@ -793,7 +806,7 @@ function applicationNode(input: ApplicationInput, withImages = false) {
 			),
 			verfuegbareArbeitsproben: field(
 				"Verfügbare Arbeitsproben (nur zur Information, wird beim Import ignoriert)",
-				samples.map((s) => s.title),
+				samples.map((s) => sampleText(s, job.language).title),
 				"Der vollständige Pool. Nur hieraus darf oben abgeschaltet werden.",
 			),
 			verfuegbareWerte: field(
@@ -1108,7 +1121,11 @@ function readSamples(node: unknown): { samples: WorkSample[]; base64: Record<str
 		samples.push({
 			id,
 			title: readString(n.titel),
+			// Absent in files written before the split: the German text is what
+			// those files carry, English starts empty and falls back to it.
+			titleEn: readString(n.titelEn),
 			description: readString(n.beschreibung),
+			descriptionEn: readString(n.beschreibungEn),
 			link: readString(n.link),
 			image: bild.name ?? undefined,
 		});
@@ -1377,7 +1394,10 @@ export function applyFilters(
 
 	for (const title of parsed.hiddenSampleTitles) {
 		for (const s of samples) {
-			if (s.title === title && s.id) job.hiddenSampleIds.push(s.id);
+			// Either title matches: a file written for an English application
+			// carries the English one, an older file the German — and the pool
+			// now holds both.
+			if ((s.title === title || s.titleEn === title) && s.id) job.hiddenSampleIds.push(s.id);
 		}
 	}
 }

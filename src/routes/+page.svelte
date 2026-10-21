@@ -8,7 +8,7 @@
 		compileCv,
 		compileCvPdf,
 	} from "$lib/letterCompiler";
-	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, contactGreeting, letterText, safeAccentColor, type LetterData, type WorkSample } from "$lib/letter";
+	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, contactGreeting, letterText, safeAccentColor, sampleText, type LetterData, type WorkSample } from "$lib/letter";
 	import {
 		DEFAULT_CV,
 		cloneCv,
@@ -148,6 +148,17 @@ let cvEn = $state<CvData | null>(null);
 	 */
 	const samplesDisclaimerKey = $derived<"samplesDisclaimer" | "samplesDisclaimerEn">(
 		shared.language === "en" ? "samplesDisclaimerEn" : "samplesDisclaimer",
+	);
+
+	/**
+	 * Which of a work sample's two texts the editor shows — the image and the
+	 * link are shared, only the prose is held twice.
+	 */
+	const sampleTitleKey = $derived<"title" | "titleEn">(
+		shared.language === "en" ? "titleEn" : "title",
+	);
+	const sampleDescKey = $derived<"description" | "descriptionEn">(
+		shared.language === "en" ? "descriptionEn" : "description",
 	);
 
 	/**
@@ -700,7 +711,14 @@ let cvEn = $state<CvData | null>(null);
 		// before the split — then it stays null and is seeded as a copy the
 		// first time English is used.
 		if (s.cvEn && typeof s.cvEn === "object") cvEn = normalizeCv(s.cvEn as CvData);
-		if (Array.isArray(s.samples)) samples = s.samples as WorkSample[];
+		if (Array.isArray(s.samples))
+			samples = (s.samples as WorkSample[]).map((sm) => ({
+				...sm,
+				// Absent in states saved before the split: the German text is what
+				// those states carry, English starts empty and falls back to it.
+				titleEn: typeof sm.titleEn === "string" ? sm.titleEn : "",
+				descriptionEn: typeof sm.descriptionEn === "string" ? sm.descriptionEn : "",
+			}));
 		if (Array.isArray(s.documents)) documents = ensureDocumentIds(s.documents as ExtraDocument[]);
 		// The English pool is its own list. Absent in states saved before the
 		// split — then it stays empty, because the German documents are not
@@ -1404,7 +1422,11 @@ let cvEn = $state<CvData | null>(null);
 					exportiert: new Date().toISOString(),
 					arbeitsproben: samples.map((s) => ({
 						titel: s.title,
+						// Both texts travel: the English one is its own field, and a
+						// round trip must never merge the two languages into one.
+						titelEn: s.titleEn ?? "",
 						beschreibung: s.description,
+						beschreibungEn: s.descriptionEn ?? "",
 						link: s.link ?? "",
 						bild: s.image ?? "",
 					})),
@@ -1437,7 +1459,11 @@ let cvEn = $state<CvData | null>(null);
 				next.push({
 					id: nid(),
 					title: typeof r.titel === "string" ? r.titel : "",
+					// Missing in files written before the split: the German text is
+					// what those carry, English starts empty.
+					titleEn: typeof r.titelEn === "string" ? r.titelEn : "",
 					description: typeof r.beschreibung === "string" ? r.beschreibung : "",
+					descriptionEn: typeof r.beschreibungEn === "string" ? r.beschreibungEn : "",
 					link: typeof r.link === "string" ? r.link : undefined,
 				});
 			}
@@ -2170,7 +2196,7 @@ let cvEn = $state<CvData | null>(null);
 	// --- Work samples (global pool, toggled per job) ---
 
 	function addSample() {
-		samples.push({ id: nid(), title: "Neues Projekt", description: "" });
+		samples.push({ id: nid(), title: "Neues Projekt", description: "", titleEn: "", descriptionEn: "" });
 	}
 
 	function removeSample(id: string | undefined) {
@@ -3443,7 +3469,11 @@ let cvEn = $state<CvData | null>(null);
 										<label
 											class="bg-[#0a0f1d] p-2 rounded border border-[#1e293b] flex items-center justify-between text-xs cursor-pointer"
 										>
-											<span class="text-slate-300">{sample.title || "Ohne Titel"}</span>
+											<!-- The title in THIS application's language — the same text
+											     the filter is written against in the JSON. -->
+											<span class="text-slate-300"
+												>{sampleText(sample, activeJob.language).title || "Ohne Titel"}</span
+											>
 											<input
 												type="checkbox"
 												checked={sampleVisible(sample.id)}
@@ -3637,6 +3667,13 @@ let cvEn = $state<CvData | null>(null);
 								class="{inputCls} leading-relaxed resize-y"
 							></textarea>
 						</div>
+						<!-- Bild und Link gelten für beide Sprachen; nur Titel und
+						     Beschreibung stehen je einmal in Deutsch und Englisch. -->
+						{#if shared.language === "en"}
+							<p class="text-[11px] text-slate-500">
+								Englische Fassung — Bild und Link gelten für beide Sprachen.
+							</p>
+						{/if}
 						{#each samples as sample, si (sample.id)}
 							<div class="{cardCls} space-y-3">
 								<div class="flex items-center justify-between">
@@ -3666,9 +3703,9 @@ let cvEn = $state<CvData | null>(null);
 										</button>
 									</div>
 								</div>
-								<input bind:value={sample.title} placeholder="Titel" class={inputCls} />
+								<input bind:value={sample[sampleTitleKey]} placeholder="Titel" class={inputCls} />
 								<textarea
-									bind:value={sample.description}
+									bind:value={sample[sampleDescKey]}
 									placeholder="Beschreibung"
 									rows="3"
 									class={inputCls}
