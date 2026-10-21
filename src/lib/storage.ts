@@ -13,6 +13,12 @@ export interface PersistedFiles {
 	photo: Blob | null;
 	signature: Blob | null;
 	samples: Record<string, Blob>;
+	/**
+	 * Sample images of the English instance, by sample id. Absent in states
+	 * saved before the split: the English instances then have no picture of
+	 * their own and fall back to the German one.
+	 */
+	samplesEn: Record<string, Blob>;
 	/** Extra PDFs by document id (Statische Daten → PDF). */
 	documents: Record<string, Blob>;
 	logos: Record<string, Blob | null>;

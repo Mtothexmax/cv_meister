@@ -26,6 +26,12 @@ export interface WorkSample {
 	link?: string;
 	/** File name of a pre-uploaded image in the virtual project, e.g. "sample-1.png". */
 	image?: string;
+	/**
+	 * File name of the English image — the English instance's own picture.
+	 * Empty falls back to the German one (same rule as the texts), and
+	 * "übernehmen" copies it so the two instances become independent.
+	 */
+	imageEn?: string;
 }
 
 import type { SharedData } from "./shared.js";
@@ -78,8 +84,8 @@ export const DEFAULT_SAMPLES: WorkSample[] = [];
  * A work sample's texts in the requested language, falling back to German
  * while the English field is still empty.
  *
- * The image and the link are shared: a screenshot and a URL say the same thing
- * in both languages, so only the prose is held twice.
+ * Only the link is shared: a URL says the same thing in both languages, so
+ * everything else (title, description, image) is held twice.
  */
 export function sampleText(s: WorkSample, lang: Language): { title: string; description: string } {
 	if (lang === "en") {
@@ -89,6 +95,23 @@ export function sampleText(s: WorkSample, lang: Language): { title: string; desc
 		};
 	}
 	return { title: s.title, description: s.description };
+}
+
+/**
+ * The "übernehmen" button: copies the OTHER language's instance onto this
+ * one — texts and image name alike, so the result is an exact copy and the
+ * two instances are independent from then on.
+ *
+ * Pure: the image bytes live outside the sample (in the per-language file
+ * maps), so the caller moves those alongside.
+ */
+export function takeoverTexts(s: WorkSample, lang: Language): WorkSample {
+	if (lang === "en") {
+		// English is on screen: the German instance is the source.
+		return { ...s, titleEn: s.title, descriptionEn: s.description, imageEn: s.image };
+	}
+	// German is on screen: the English instance is the source.
+	return { ...s, title: s.titleEn, description: s.descriptionEn, image: s.imageEn };
 }
 
 /** Escapes a plain string for use inside a Typst string literal. */

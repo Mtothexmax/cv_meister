@@ -114,9 +114,17 @@ export interface CvNode {
  */
 export interface SampleNode {
 	titel: JsonField<string>;
+	titelEn: JsonField<string>;
 	beschreibung: JsonField<string>;
+	beschreibungEn: JsonField<string>;
 	link: JsonField<string>;
 	bild: JsonFileRef;
+	/**
+	 * The English instance's own image — the mirror of `bild`. In files
+	 * written before the split it is absent; an absent or empty reference
+	 * leaves the English instance without a picture of its own.
+	 */
+	bildEn?: JsonFileRef;
 }
 
 /**
@@ -445,6 +453,8 @@ export interface ApplicationInput {
 	photoBase64?: string | null;
 	signatureBase64?: string | null;
 	sampleBase64?: Record<string, string>;
+	/** Bytes of the English sample images, keyed like `sampleBase64`. */
+	sampleBase64En?: Record<string, string>;
 	documentBase64?: Record<string, string>;
 	/** Derived data the UI shows. */
 	preview: {
@@ -463,6 +473,8 @@ export interface ApplicationInput {
 function sampleNodes(
 	samples: WorkSample[],
 	sampleBase64?: Record<string, string>,
+	/** Bytes of the English images, keyed like `sampleBase64`. */
+	sampleBase64En?: Record<string, string>,
 ): SampleNode[] {
 	return samples.map((s) => {
 		const ref: JsonFileRef = {
@@ -472,6 +484,17 @@ function sampleNodes(
 		if (sampleBase64 && s.id) {
 			const b64 = sampleBase64[s.id];
 			if (b64) ref.base64 = b64;
+		}
+		// The English instance's own picture — the mirror of `bild`. Absent in
+		// files written before the split: on import an absent field leaves the
+		// English instance without one (it then falls back to the German).
+		const refEn: JsonFileRef = {
+			vorhanden: !!s.imageEn,
+			name: s.imageEn ?? null,
+		};
+		if (sampleBase64En && s.id) {
+			const b64 = sampleBase64En[s.id];
+			if (b64) refEn.base64 = b64;
 		}
 		return {
 			titel: field("Titel", s.title),
@@ -488,6 +511,7 @@ function sampleNodes(
 			),
 			link: field("Link (optional)", s.link ?? ""),
 			bild: ref,
+			bildEn: refEn,
 		};
 	});
 }
@@ -911,7 +935,7 @@ export function buildWorkspaceJson(
 		lebenslauf: cvNode(first.cv),
 		dokumente: documentNodes(documents, documentHasFile, documentNames, first.documentBase64),
 		statischeDaten: staticNode(staticData),
-		arbeitsproben: sampleNodes(first.samples, first.sampleBase64),
+		arbeitsproben: sampleNodes(first.samples, first.sampleBase64, first.sampleBase64En),
 		bilder: {
 			hinweis:
 				"Bilddaten als data:-URL (Base64). Nur in diesem Export — der Bewerbungs-Export enthält keine Bilddaten.",
@@ -1110,13 +1134,19 @@ function readCvNode(node: unknown): CvData | null {
  * matched by title. Images travel as base64 keyed by that fresh id, which is
  * only produced by the workspace export.
  */
-function readSamples(node: unknown): { samples: WorkSample[]; base64: Record<string, string> } {
+function readSamples(
+	node: unknown,
+): { samples: WorkSample[]; base64: Record<string, string>; base64En: Record<string, string> } {
 	const list = Array.isArray(node) ? node : [];
 	const samples: WorkSample[] = [];
 	const base64: Record<string, string> = {};
+	const base64En: Record<string, string> = {};
 	list.forEach((raw, i) => {
 		const n = (raw ?? {}) as Record<string, unknown>;
 		const bild = readFileRef(n.bild);
+		// Absent in files written before the image split: the English instance
+		// then has no picture of its own and falls back to the German one.
+		const bildEn = readFileRef(n.bildEn);
 		const id = `s${i}`;
 		samples.push({
 			id,
@@ -1128,10 +1158,12 @@ function readSamples(node: unknown): { samples: WorkSample[]; base64: Record<str
 			descriptionEn: readString(n.beschreibungEn),
 			link: readString(n.link),
 			image: bild.name ?? undefined,
+			imageEn: bildEn.name ?? undefined,
 		});
 		if (bild.base64) base64[id] = bild.base64;
+		if (bildEn.base64) base64En[id] = bildEn.base64;
 	});
-	return { samples, base64 };
+	return { samples, base64, base64En };
 }
 
 /** Reads one application node (shared by both document arts). */
@@ -1289,6 +1321,8 @@ export interface ParsedWorkspace {
 	/** Fresh ids (`s0`, `s1`, …); the images travel as base64. */
 	samples: WorkSample[];
 	sampleBase64: Record<string, string>;
+	/** Bytes of the English images, keyed like `sampleBase64`. */
+	sampleBase64En: Record<string, string>;
 	images: {
 		foto: { base64: string | null; name: string | null };
 		unterschrift: { base64: string | null; name: string | null };
@@ -1340,6 +1374,7 @@ export function readWorkspaceJson(
 		documentBase64,
 		samples: pool.samples,
 		sampleBase64: pool.base64,
+		sampleBase64En: pool.base64En,
 		images: {
 			foto: { base64: foto.base64, name: foto.name },
 			unterschrift: { base64: unterschrift.base64, name: unterschrift.name },

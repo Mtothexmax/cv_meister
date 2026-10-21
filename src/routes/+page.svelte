@@ -8,7 +8,7 @@
 		compileCv,
 		compileCvPdf,
 	} from "$lib/letterCompiler";
-	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, contactGreeting, letterText, safeAccentColor, sampleText, type LetterData, type WorkSample } from "$lib/letter";
+	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, contactGreeting, letterText, safeAccentColor, sampleText, takeoverTexts, type LetterData, type WorkSample } from "$lib/letter";
 	import {
 		DEFAULT_CV,
 		cloneCv,
@@ -229,6 +229,12 @@ let cvEn = $state<CvData | null>(null);
 	let signatureFile = $state<File | null>(null);
 	/** Sample images by sample id (global pool). */
 	let sampleFiles = $state<Record<string, File>>({});
+	/**
+	 * Sample images of the English instance, by sample id. The English
+	 * instance of a sample has a picture of its own; while it has none, the
+	 * German one is rendered (same fallback as the texts).
+	 */
+	let sampleFilesEn = $state<Record<string, File>>({});
 	/** Uploaded PDFs by document id (global pool, attached to every mail). */
 	let documentFiles = $state<Record<string, File>>({});
 
@@ -520,6 +526,7 @@ let cvEn = $state<CvData | null>(null);
 									logo: jf?.logo ?? null,
 									signature: signatureFile,
 									sampleFiles,
+									sampleFilesEn,
 									photo: photoFile,
 								},
 								disclaimer,
@@ -533,6 +540,7 @@ let cvEn = $state<CvData | null>(null);
 									logo: jf?.logo ?? null,
 									signature: signatureFile,
 									sampleFiles,
+									sampleFilesEn,
 								},
 								disclaimer,
 							);
@@ -591,6 +599,7 @@ let cvEn = $state<CvData | null>(null);
 				photo: photoFile,
 				signature: signatureFile,
 				samples: { ...sampleFiles },
+				samplesEn: { ...sampleFilesEn },
 				documents: { ...documentFiles },
 				logos,
 				logoUrls,
@@ -747,6 +756,13 @@ let cvEn = $state<CvData | null>(null);
 				if (f.samples && typeof f.samples === "object") {
 					for (const [k, v] of Object.entries(f.samples)) {
 						if (v instanceof Blob) sampleFiles[k] = v as File;
+					}
+				}
+				// Absent in states saved before the split: the English
+				// instances then have no picture of their own.
+				if (f.samplesEn && typeof f.samplesEn === "object") {
+					for (const [k, v] of Object.entries(f.samplesEn)) {
+						if (v instanceof Blob) sampleFilesEn[k] = v as File;
 					}
 				}
 				if (f.documents && typeof f.documents === "object") {
@@ -940,6 +956,10 @@ let cvEn = $state<CvData | null>(null);
 		input.sampleBase64 = {};
 		for (const [id, f] of Object.entries(sampleFiles)) {
 			input.sampleBase64[id] = await blobToDataUrl(f);
+		}
+		input.sampleBase64En = {};
+		for (const [id, f] of Object.entries(sampleFilesEn)) {
+			input.sampleBase64En[id] = await blobToDataUrl(f);
 		}
 		input.documentBase64 = {};
 		for (const [id, f] of Object.entries(documentFiles)) {
@@ -1420,16 +1440,19 @@ let cvEn = $state<CvData | null>(null);
 					version: JSON_VERSION,
 					art: "arbeitsproben",
 					exportiert: new Date().toISOString(),
-					arbeitsproben: samples.map((s) => ({
-						titel: s.title,
-						// Both texts travel: the English one is its own field, and a
-						// round trip must never merge the two languages into one.
-						titelEn: s.titleEn ?? "",
-						beschreibung: s.description,
-						beschreibungEn: s.descriptionEn ?? "",
-						link: s.link ?? "",
-						bild: s.image ?? "",
-					})),
+				arbeitsproben: samples.map((s) => ({
+					titel: s.title,
+					// Both texts travel: the English one is its own field, and a
+					// round trip must never merge the two languages into one.
+					titelEn: s.titleEn ?? "",
+					beschreibung: s.description,
+					beschreibungEn: s.descriptionEn ?? "",
+					link: s.link ?? "",
+					bild: s.image ?? "",
+					// Only when the English instance has a picture of its own —
+					// an absent field keeps the fallback to the German one.
+					...(s.imageEn ? { bildEn: s.imageEn } : {}),
+				})),
 				},
 				null,
 				2,
@@ -1465,10 +1488,14 @@ let cvEn = $state<CvData | null>(null);
 					description: typeof r.beschreibung === "string" ? r.beschreibung : "",
 					descriptionEn: typeof r.beschreibungEn === "string" ? r.beschreibungEn : "",
 					link: typeof r.link === "string" ? r.link : undefined,
+					// Missing in files written before the image split: the English
+					// instance then has no picture of its own.
+					imageEn: typeof r.bildEn === "string" ? r.bildEn : "",
 				});
 			}
 			samples = next;
 			sampleFiles = {};
+			sampleFilesEn = {};
 			scheduleSave();
 			render();
 		} catch (e) {
@@ -1593,7 +1620,12 @@ let cvEn = $state<CvData | null>(null);
 	 */
 	async function compileBothPdfs(job: JobData): Promise<{ letterPdf: Uint8Array; cvPdf: Uint8Array }> {
 		const jf = jobFiles[job.id];
-		const assets = { logo: jf?.logo ?? null, signature: signatureFile, sampleFiles };
+		const assets = {
+			logo: jf?.logo ?? null,
+			signature: signatureFile,
+			sampleFiles,
+			sampleFilesEn,
+		};
 		const letterPdf = await compileLetterPdf(
 			shared,
 			job,
@@ -1715,7 +1747,12 @@ let cvEn = $state<CvData | null>(null);
 				job,
 				job.letter,
 				samples,
-				{ logo: jf?.logo ?? null, signature: signatureFile, sampleFiles },
+				{
+					logo: jf?.logo ?? null,
+					signature: signatureFile,
+					sampleFiles,
+					sampleFilesEn,
+				},
 				samplesDisclaimerText(staticData, job.language),
 			);
 		}
@@ -1737,6 +1774,7 @@ let cvEn = $state<CvData | null>(null);
 				logo: jf?.logo ?? null,
 				signature: signatureFile,
 				sampleFiles,
+				sampleFilesEn,
 				photo: photoFile,
 			},
 			samplesDisclaimerText(staticData, job.language),
@@ -2056,6 +2094,13 @@ let cvEn = $state<CvData | null>(null);
 			const file = dataUrlToFile(b64, `probe-${id}.png`);
 			if (file) sampleFiles[id] = file;
 		}
+		// The English images are their own set. Absent in an old backup: the
+		// English instances then have none and fall back to the German ones.
+		sampleFilesEn = {};
+		for (const [id, b64] of Object.entries(p.sampleBase64En)) {
+			const file = dataUrlToFile(b64, `probe-${id}-en.png`);
+			if (file) sampleFilesEn[id] = file;
+		}
 
 		jobFiles = {};
 		p.jobs.forEach((parsed, i) => {
@@ -2105,6 +2150,7 @@ let cvEn = $state<CvData | null>(null);
 		photoFile = null;
 		signatureFile = null;
 		sampleFiles = {};
+		sampleFilesEn = {};
 		documentFiles = {};
 		jobFiles = {};
 		logoNote = "";
@@ -2196,7 +2242,14 @@ let cvEn = $state<CvData | null>(null);
 	// --- Work samples (global pool, toggled per job) ---
 
 	function addSample() {
-		samples.push({ id: nid(), title: "Neues Projekt", description: "", titleEn: "", descriptionEn: "" });
+		samples.push({
+			id: nid(),
+			title: "Neues Projekt",
+			description: "",
+			titleEn: "",
+			descriptionEn: "",
+			imageEn: "",
+		});
 	}
 
 	function removeSample(id: string | undefined) {
@@ -2204,6 +2257,7 @@ let cvEn = $state<CvData | null>(null);
 		if (i >= 0) samples.splice(i, 1);
 		if (id) {
 			delete sampleFiles[id];
+			delete sampleFilesEn[id];
 			for (const j of jobs) {
 				const k = j.hiddenSampleIds.indexOf(id);
 				if (k >= 0) j.hiddenSampleIds.splice(k, 1);
@@ -2211,10 +2265,52 @@ let cvEn = $state<CvData | null>(null);
 		}
 	}
 
+	/**
+	 * The image belongs to the language that is on screen: the German upload
+	 * fills the German instance's slot, the English one the English slot. The
+	 * file name travels with it, so the JSON exports can name the picture.
+	 */
 	function onSampleImage(id: string | undefined, files: FileList | null) {
 		if (!id) return;
-		if (files?.[0]) sampleFiles[id] = files[0];
-		else delete sampleFiles[id];
+		const en = shared.language === "en";
+		const map = en ? sampleFilesEn : sampleFiles;
+		const s = samples.find((x) => x.id === id);
+		if (files?.[0]) {
+			map[id] = files[0];
+			if (s) s[en ? "imageEn" : "image"] = files[0].name;
+		} else {
+			delete map[id];
+			if (s) s[en ? "imageEn" : "image"] = "";
+		}
+		render();
+	}
+
+	/** The "übernehmen" dialog for the WHOLE pool (false = closed). */
+	let takeoverOpen = $state(false);
+
+	/**
+	 * "Übernehmen" for every sample at once: makes the instance on screen an
+	 * exact copy of the other one — texts and image, the file bytes included.
+	 * Both are replaced, so what the active language held before is gone
+	 * (hence the dialog).
+	 */
+	function applyTakeover() {
+		takeoverOpen = false;
+		const en = shared.language === "en";
+		const from = en ? sampleFiles : sampleFilesEn;
+		const to = en ? sampleFilesEn : sampleFiles;
+		for (let i = 0; i < samples.length; i++) {
+			const s = samples[i];
+			// The File object is handed over as-is: it is never mutated, so both
+			// instances can share the reference until one is replaced.
+			if (s.id) {
+				const file = from[s.id];
+				if (file) to[s.id] = file;
+				else delete to[s.id];
+			}
+			samples[i] = takeoverTexts(s, shared.language);
+		}
+		scheduleSave();
 		render();
 	}
 
@@ -2461,6 +2557,7 @@ let cvEn = $state<CvData | null>(null);
 		// touched inside collectState(), so picking a file scheduled neither a
 		// save nor a re-render and the upload was lost until some other edit.
 		void JSON.stringify(sampleFiles);
+		void JSON.stringify(sampleFilesEn);
 		void JSON.stringify(documentFiles);
 		dlog("effect fired");
 		if (ready) scheduleRender();
@@ -3667,13 +3764,29 @@ let cvEn = $state<CvData | null>(null);
 								class="{inputCls} leading-relaxed resize-y"
 							></textarea>
 						</div>
-						<!-- Bild und Link gelten für beide Sprachen; nur Titel und
-						     Beschreibung stehen je einmal in Deutsch und Englisch. -->
+						<!-- Nur der Link gilt für beide Sprachen; Titel, Beschreibung
+						     und Bild stehen je einmal in Deutsch und Englisch. -->
 						{#if shared.language === "en"}
 							<p class="text-[11px] text-slate-500">
-								Englische Fassung — Bild und Link gelten für beide Sprachen.
+								Englische Fassung — nur der Link gilt für beide Sprachen.
 							</p>
 						{/if}
+						<!-- Ein Button für den ganzen Pool: er übernimmt Titel,
+						     Beschreibung und Bild ALLER Proben aus der anderen
+						     Sprachfassung (nach Rückfrage im Dialog). -->
+						<div class="flex justify-end">
+							<button
+								id="takeover-all"
+								onclick={() => (takeoverOpen = true)}
+								disabled={samples.length === 0}
+								class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 disabled:opacity-40 transition-colors"
+								title="Titel, Beschreibung und Bild aller Proben aus der anderen Sprachfassung übernehmen"
+							>
+								{shared.language === "en"
+									? "Von Deutsch übernehmen"
+									: "Von Englisch übernehmen"}
+							</button>
+						</div>
 						{#each samples as sample, si (sample.id)}
 							<div class="{cardCls} space-y-3">
 								<div class="flex items-center justify-between">
@@ -3711,8 +3824,10 @@ let cvEn = $state<CvData | null>(null);
 									class={inputCls}
 								></textarea>
 								<input bind:value={sample.link} placeholder="Link (optional)" class={inputCls} />
-								{@render fileButton(sampleFiles[sample.id ?? ""]?.name ?? null, (f) =>
-									onSampleImage(sample.id, f),
+								{@render fileButton(
+									(shared.language === "en" ? sampleFilesEn : sampleFiles)[sample.id ?? ""]?.name ??
+										null,
+									(f) => onSampleImage(sample.id, f),
 								)}
 							</div>
 						{/each}
@@ -4491,6 +4606,44 @@ let cvEn = $state<CvData | null>(null);
 				>
 					Schließen
 				</button>
+			</div>
+		</div>
+	{/if}
+
+	{#if takeoverOpen}
+		<div
+			id="takeover-dialog"
+			class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3 overflow-y-auto"
+		>
+			<div
+				class="bg-[#131b2e] border border-[#1e293b] rounded-lg max-w-sm w-full p-4 space-y-3"
+			>
+				<h3 class="text-xs font-bold text-slate-100">Fassung übernehmen</h3>
+				<p class="text-[11px] text-slate-400 leading-relaxed">
+					Alle Proben ({samples.length}): Titel, Beschreibung und Bild werden aus der
+					<strong class="text-slate-300"
+						>{shared.language === "en" ? "deutschen" : "englischen"}</strong
+					>
+					Fassung übernommen. Die
+					<strong class="text-slate-300"
+						>{shared.language === "en" ? "englischen" : "deutschen"}</strong
+					> Daten aller Proben werden dabei überschrieben.
+				</p>
+				<div class="flex justify-end gap-2">
+					<button
+						onclick={() => (takeoverOpen = false)}
+						class="px-3 py-1.5 bg-slate-800 text-slate-300 rounded text-xs"
+					>
+						Abbrechen
+					</button>
+					<button
+						id="takeover-confirm"
+						onclick={applyTakeover}
+						class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold"
+					>
+						Übernehmen
+					</button>
+				</div>
 			</div>
 		</div>
 	{/if}

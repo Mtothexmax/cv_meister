@@ -96,7 +96,14 @@ export function visibleSamples(all: WorkSample[], job: JobData): WorkSample[] {
 export interface LetterAssets {
 	logo?: File | null;
 	signature?: File | null;
+	/** Sample images of the German instance, by sample id. */
 	sampleFiles?: Record<string, File>;
+	/**
+	 * Sample images of the English instance, by sample id. An English sample
+	 * without its own image falls back to the German one (same rule as the
+	 * texts), so this map may legitimately stay empty.
+	 */
+	sampleFilesEn?: Record<string, File>;
 }
 
 async function readBytes(file: File): Promise<Uint8Array> {
@@ -140,8 +147,15 @@ async function buildLetterFiles(
 
 	const prepared: WorkSample[] = [];
 	let idx = 0;
+	// An English sample renders its own image when it has one and the German
+	// picture otherwise — the same fallback the texts use.
+	const en = job.language === "en";
 	for (const s of visibleSamples(allSamples, job)) {
-		const uploaded = s.id ? assets.sampleFiles?.[s.id] : undefined;
+		const uploaded = s.id
+			? en
+				? (assets.sampleFilesEn?.[s.id] ?? assets.sampleFiles?.[s.id])
+				: assets.sampleFiles?.[s.id]
+			: undefined;
 		if (!uploaded) {
 			prepared.push({ ...s, image: undefined });
 			continue;
