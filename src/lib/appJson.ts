@@ -263,6 +263,12 @@ export interface WorkspaceDoc extends Envelope {
 	 */
 	lebenslaufEn?: CvNode | null;
 	dokumente: DocumentNode[];
+	/**
+	 * The English pool of extra PDFs — a second list, not a translated view of
+	 * `dokumente`. Absent means the file was written before the split and the
+	 * existing pool stays untouched on import.
+	 */
+	dokumenteEn?: DocumentNode[] | null;
 	/** Statische Daten (Erfahrung, Antrieb, Arbeitsproben-Hinweis). */
 	statischeDaten: Record<string, JsonField<string>>;
 	/** The global work-sample pool — only this export carries its images. */
@@ -414,6 +420,7 @@ const ANLEITUNG_APP_TAIL = [
 const ANLEITUNG_WORKSPACE_TAIL = [
 	"Das ist der vollständige Arbeitsbereich (Sicherung), nicht die Vorlage für eine einzelne Bewerbung.",
 	'Bilder und Dokumente liegen als data:-URL (Base64) unter "bilder", arbeitsproben[].bild.base64 und dokumente[].base64.',
+	'Es gibt zwei Dokument-Listen: "dokumente" (deutsch) und "dokumenteEn" (englisch). Eine Bewerbung hängt die Liste ihrer Sprache an.',
 	"Zuordnungen laufen über die Indizes in bewerbungen[] und die sichtbaren Namen — es gibt keine IDs.",
 	"Jede Bewerbung kann einen eigenen Lebenslauf haben (bewerbungen[].eigenerLebenslauf); ist er dort nicht aktiv, gilt der globale Lebenslauf oben.",
 ];
@@ -576,6 +583,11 @@ export function staticNode(sd: StaticData): Record<string, JsonField<string>> {
 			"Hinweis über den Proben",
 			sd.samplesDisclaimer,
 			"Erscheint als Hinweiszeile über den Arbeitsproben im Anschreiben.",
+		),
+		arbeitsprobenHinweisEn: field(
+			"Hinweis über den Proben (Englisch)",
+			sd.samplesDisclaimerEn,
+			"Eigener Text, keine Kopie — gilt, wenn die Bewerbung auf Englisch läuft. Leer = deutsche Fassung.",
 		),
 	};
 }
@@ -860,6 +872,10 @@ export function buildWorkspaceJson(
 	view: string,
 	staticTab: string,
 	staticData: StaticData,
+	/** The German pool of extra PDFs — attached to every German application. */
+	documents: ExtraDocument[],
+	/** The English pool — attached to every English application instead. */
+	documentsEn: ExtraDocument[],
 	documentNames: (doc: ExtraDocument) => string,
 	documentHasFile: (id: string) => boolean,
 	/** The English instance of the global CV — its own document, not a layer over the German one. */
@@ -880,7 +896,7 @@ export function buildWorkspaceJson(
 		bewerbungen: inputs.map((i) => applicationNode(i, true)),
 		stammdaten: sharedNode(first.shared),
 		lebenslauf: cvNode(first.cv),
-		dokumente: documentNodes(first.documents, documentHasFile, documentNames, first.documentBase64),
+		dokumente: documentNodes(documents, documentHasFile, documentNames, first.documentBase64),
 		statischeDaten: staticNode(staticData),
 		arbeitsproben: sampleNodes(first.samples, first.sampleBase64),
 		bilder: {
@@ -898,6 +914,9 @@ export function buildWorkspaceJson(
 	// Carried only when one exists: an absent field has to mean "unchanged" on
 	// import, so an old backup never wipes a translated CV.
 	if (cvEn) doc.lebenslaufEn = cvNode(cvEn);
+	// Same rule for the English document pool — an empty one is a legitimate
+	// state (no English PDFs uploaded yet) and is exported as an empty list.
+	doc.dokumenteEn = documentNodes(documentsEn, documentHasFile, documentNames, first.documentBase64);
 	return doc;
 }
 
@@ -1007,6 +1026,7 @@ function readStaticNode(node: unknown, fallback: StaticData): StaticData {
 		erfahrungEn: readString(n.erfahrungEn, fallback.erfahrungEn),
 		antrieb: readString(n.antrieb, fallback.antrieb),
 		samplesDisclaimer: readString(n.arbeitsprobenHinweis, fallback.samplesDisclaimer),
+		samplesDisclaimerEn: readString(n.arbeitsprobenHinweisEn, fallback.samplesDisclaimerEn),
 	};
 }
 
@@ -1017,10 +1037,17 @@ function readStaticNode(node: unknown, fallback: StaticData): StaticData {
  * travel as base64 instead. `dateiname` is the attachment name the file was
  * saved under — used only when `name` is empty.
  */
-export function readDocumentList(doc: { dokumente?: DocumentNode[] }): ExtraDocument[] {
+export function readDocumentList(
+	doc: { dokumente?: DocumentNode[] },
+	/**
+	 * Id prefix. The two language pools are separate lists, so their ids must
+	 * not collide — a restore maps the base64 bytes by these ids.
+	 */
+	idPrefix = "doc-",
+): ExtraDocument[] {
 	return (Array.isArray(doc.dokumente) ? doc.dokumente : []).map((d, i) => {
 		const name = readString(d.name) || readString(d.dateiname).replace(/\.pdf$/i, "");
-		return { id: `doc-${i}`, name };
+		return { id: `${idPrefix}${i}`, name };
 	});
 }
 
@@ -1235,6 +1262,12 @@ export interface ParsedWorkspace {
 	staticData: StaticData | null;
 	/** Fresh ids (`doc-0`, `doc-1`, …); the bytes travel as base64. */
 	documents: ExtraDocument[];
+	/**
+	 * The English pool of extra PDFs. An empty array is a real state (nothing
+	 * uploaded for English yet); null means the file carried no such field, so
+	 * an existing pool must survive the import.
+	 */
+	documentsEn: ExtraDocument[] | null;
 	documentBase64: Record<string, string>;
 	/** Fresh ids (`s0`, `s1`, …); the images travel as base64. */
 	samples: WorkSample[];
@@ -1260,10 +1293,19 @@ export function readWorkspaceJson(
 	const unterschrift = readFileRef(bilder.unterschrift);
 
 	const documents = readDocumentList(doc);
+	// Only read when the field is there at all: an old backup has no English
+	// pool, and the existing one must not be wiped by a restore.
+	const documentsEn = Array.isArray(doc.dokumenteEn)
+		? readDocumentList({ dokumente: doc.dokumenteEn }, "docEn-")
+		: null;
 	const documentBase64: Record<string, string> = {};
-	(Array.isArray(doc.dokumente) ? doc.dokumente : []).forEach((d, i) => {
-		if (typeof d.base64 === "string" && d.base64) documentBase64[`doc-${i}`] = d.base64;
-	});
+	const collectBase64 = (nodes: DocumentNode[] | null | undefined, prefix: string) => {
+		(nodes ?? []).forEach((d, i) => {
+			if (typeof d.base64 === "string" && d.base64) documentBase64[`${prefix}${i}`] = d.base64;
+		});
+	};
+	collectBase64(doc.dokumente, "doc-");
+	collectBase64(doc.dokumenteEn, "docEn-");
 
 	const oberflaeche = (doc.oberflaeche ?? {}) as Record<string, unknown>;
 	const active = doc.aktiveBewerbung;
@@ -1277,6 +1319,7 @@ export function readWorkspaceJson(
 		staticTab: typeof oberflaeche.statischeDatenReiter === "string" ? oberflaeche.statischeDatenReiter : null,
 		staticData: readStaticNode(doc.statischeDaten, fallbackStatic),
 		documents,
+		documentsEn,
 		documentBase64,
 		samples: pool.samples,
 		sampleBase64: pool.base64,

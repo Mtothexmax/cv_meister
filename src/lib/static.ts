@@ -21,6 +21,12 @@ export interface StaticData {
 	antrieb: string;
 	/** Disclaimer above the work samples (editable under Arbeitsproben). */
 	samplesDisclaimer: string;
+	/**
+	 * The English variant of `samplesDisclaimer` — a separate string, not a
+	 * copy. Same contract as `erfahrungEn`: editing one never touches the
+	 * other, so switching the language back shows what was there before.
+	 */
+	samplesDisclaimerEn: string;
 }
 
 /**
@@ -49,6 +55,8 @@ export const DEFAULT_STATIC: StaticData = {
 	antrieb: antriebTxt,
 	samplesDisclaimer:
 		"Hinweis: Platzhaltertext. Hier kannst du einen Hinweis zu deinen Arbeitsproben eintragen — etwa eine Einordnung, wie die Projekte entstanden sind und welche Qualitätsmaßstäbe gelten.",
+	samplesDisclaimerEn:
+		"Note: placeholder text. Here you can add a note about your work samples — for example some context on how the projects came about and which quality standards apply.",
 };
 
 /**
@@ -61,6 +69,18 @@ export const DEFAULT_STATIC: StaticData = {
 export function erfahrungText(sd: StaticData, lang: Language = "de"): string {
 	if (lang === "en" && sd.erfahrungEn.trim()) return sd.erfahrungEn;
 	return sd.erfahrung;
+}
+
+/**
+ * The work-samples disclaimer in the requested language, falling back to
+ * German while the English field is still empty.
+ *
+ * Rendered above the work samples of a cover letter, so it follows the
+ * application's language exactly like the letter text and the CV.
+ */
+export function samplesDisclaimerText(sd: StaticData, lang: Language = "de"): string {
+	if (lang === "en" && sd.samplesDisclaimerEn.trim()) return sd.samplesDisclaimerEn;
+	return sd.samplesDisclaimer;
 }
 
 /**

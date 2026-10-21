@@ -39,6 +39,12 @@ export interface PersistedState {
 	samples: unknown;
 	/** Extra PDFs (Statische Daten → PDF). Absent in states saved before this feature. */
 	documents: unknown;
+	/**
+	 * The English pool of extra PDFs — a second list, separate from `documents`.
+	 * Absent in states saved before the split: the German pool is then the only
+	 * one, and the English one starts empty.
+	 */
+	documentsEn: unknown;
 	staticData: unknown;
 	activeJobId: string;
 	view: string;

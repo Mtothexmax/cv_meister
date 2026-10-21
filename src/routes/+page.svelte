@@ -24,6 +24,7 @@
 		DEFAULT_STATIC,
 		ensureDocumentIds,
 		erfahrungText,
+		samplesDisclaimerText,
 		type ExtraDocument,
 		type StaticData,
 	} from "$lib/static";
@@ -111,6 +112,14 @@ let cvEn = $state<CvData | null>(null);
 	let samples = $state<WorkSample[]>(structuredClone(DEFAULT_SAMPLES));
 	/** Extra PDFs attached to every application (Statische Daten → PDF). */
 	let documents = $state<ExtraDocument[]>(structuredClone(DEFAULT_DOCUMENTS));
+	/**
+	 * The English pool of extra PDFs — a second list, not a copy of the German
+	 * one. An English application attaches these instead, so a German Zeugnis
+	 * and an English certificate are two separate entries with their own files.
+	 * Starts empty: nothing is pre-filled, because the English documents are
+	 * usually different files rather than renamed German ones.
+	 */
+	let documentsEn = $state<ExtraDocument[]>([]);
 	let staticData = $state<StaticData>(structuredClone(DEFAULT_STATIC));
 	let staticTab = $state<StaticTab>("stammdaten");
 	let detailTab = $state<DetailTab>("bewerbung");
@@ -131,6 +140,14 @@ let cvEn = $state<CvData | null>(null);
 	 */
 	const erfahrungKey = $derived<"erfahrung" | "erfahrungEn">(
 		shared.language === "en" ? "erfahrungEn" : "erfahrung",
+	);
+
+	/**
+	 * Which of the two work-sample notes the editor shows. Same contract as
+	 * `erfahrungKey`: the other language stays in state untouched.
+	 */
+	const samplesDisclaimerKey = $derived<"samplesDisclaimer" | "samplesDisclaimerEn">(
+		shared.language === "en" ? "samplesDisclaimerEn" : "samplesDisclaimer",
 	);
 
 	/**
@@ -173,6 +190,24 @@ let cvEn = $state<CvData | null>(null);
 	 */
 	function editingCv(): CvData {
 		return shared.language === "en" ? (cvEn ?? cv) : cv;
+	}
+
+	/**
+	 * The extra PDFs an application attaches — the pool of its language.
+	 *
+	 * One resolver for every caller (mail preview, .eml, Gmail, download, JSON
+	 * export). No fallback to German: an empty English pool means "no English
+	 * documents yet", which is a real state the PDF tab shows plainly. The
+	 * uploaded files live in one map keyed by id, and the ids of the two pools
+	 * never collide, so a lookup by id works for either.
+	 */
+	function documentsFor(job: JobData): ExtraDocument[] {
+		return job.language === "en" ? documentsEn : documents;
+	}
+
+	/** The pool the PDF tab edits — the one of the active language. */
+	function editingDocuments(): ExtraDocument[] {
+		return shared.language === "en" ? documentsEn : documents;
 	}
 
 	/** Only entries inside a category marked as switchable appear in the filter. */
@@ -459,6 +494,7 @@ let cvEn = $state<CvData | null>(null);
 				return;
 			}
 			const jf = jobFiles[job.id];
+			const disclaimer = samplesDisclaimerText(staticData, job.language);
 			const result =
 				previewDoc === "cv"
 					? await compileCv(shared, job, cvFor(job), photoFile)
@@ -475,7 +511,7 @@ let cvEn = $state<CvData | null>(null);
 									sampleFiles,
 									photo: photoFile,
 								},
-								staticData.samplesDisclaimer,
+								disclaimer,
 							)
 						: await compileLetter(
 								shared,
@@ -487,7 +523,7 @@ let cvEn = $state<CvData | null>(null);
 									signature: signatureFile,
 									sampleFiles,
 								},
-								staticData.samplesDisclaimer,
+								disclaimer,
 							);
 			if (token !== renderToken) return;
 			// Only touch the DOM when content actually changed (avoids flicker).
@@ -538,6 +574,7 @@ let cvEn = $state<CvData | null>(null);
 			cvEn,
 			samples,
 			documents,
+			documentsEn,
 			staticData,
 			files: {
 				photo: photoFile,
@@ -556,8 +593,9 @@ let cvEn = $state<CvData | null>(null);
 		cv: snap.cv,
 		cvEn: snap.cvEn,
 		samples: snap.samples,
-			documents: snap.documents,
-			staticData: snap.staticData,
+		documents: snap.documents,
+		documentsEn: snap.documentsEn,
+		staticData: snap.staticData,
 			activeJobId,
 			view,
 			staticTab,
@@ -664,10 +702,19 @@ let cvEn = $state<CvData | null>(null);
 		if (s.cvEn && typeof s.cvEn === "object") cvEn = normalizeCv(s.cvEn as CvData);
 		if (Array.isArray(s.samples)) samples = s.samples as WorkSample[];
 		if (Array.isArray(s.documents)) documents = ensureDocumentIds(s.documents as ExtraDocument[]);
+		// The English pool is its own list. Absent in states saved before the
+		// split — then it stays empty, because the German documents are not
+		// copies: the English ones are usually different files.
+		if (Array.isArray(s.documentsEn))
+			documentsEn = ensureDocumentIds(s.documentsEn as ExtraDocument[]);
 		if (s.staticData && typeof s.staticData === "object")
 			staticData = s.staticData as StaticData;
 		if (typeof staticData.samplesDisclaimer !== "string")
 			staticData.samplesDisclaimer = structuredClone(DEFAULT_STATIC).samplesDisclaimer;
+		// Absent in states saved before the note was split: the German note is
+		// what those states carry, English starts from the placeholder.
+		if (typeof staticData.samplesDisclaimerEn !== "string")
+			staticData.samplesDisclaimerEn = structuredClone(DEFAULT_STATIC).samplesDisclaimerEn;
 		// Absent in states saved before the experience text was split: the
 		// German text is what those states carry, English starts empty.
 		if (typeof staticData.erfahrungEn !== "string") staticData.erfahrungEn = "";
@@ -844,7 +891,9 @@ let cvEn = $state<CvData | null>(null);
 			// The CV this application actually renders — its own one when set.
 			cv: cvFor(job),
 			samples,
-			documents,
+			// The pool of this application's language: an English application
+			// lists the English documents, a German one the German.
+			documents: documentsFor(job),
 			logoUrl: files?.logoUrl ?? null,
 			logoName: files?.logo?.name ?? null,
 			photoName: photoFile?.name ?? null,
@@ -1301,6 +1350,8 @@ let cvEn = $state<CvData | null>(null);
 					erfahrungEn: staticData.erfahrungEn,
 					antrieb: staticData.antrieb,
 					arbeitsprobenHinweis: staticData.samplesDisclaimer,
+					// The English note is its own string — the export carries both.
+					arbeitsprobenHinweisEn: staticData.samplesDisclaimerEn,
 				},
 				null,
 				2,
@@ -1326,6 +1377,9 @@ let cvEn = $state<CvData | null>(null);
 			if (typeof d.erfahrungEn === "string") staticData.erfahrungEn = d.erfahrungEn;
 			if (typeof d.antrieb === "string") staticData.antrieb = d.antrieb;
 			if (typeof d.arbeitsprobenHinweis === "string") staticData.samplesDisclaimer = d.arbeitsprobenHinweis;
+			// Missing in files written before the split — the existing note stays.
+			if (typeof d.arbeitsprobenHinweisEn === "string")
+				staticData.samplesDisclaimerEn = d.arbeitsprobenHinweisEn;
 			scheduleSave();
 		} catch (e) {
 			staticJsonError = e instanceof Error ? e.message : "Import fehlgeschlagen";
@@ -1413,6 +1467,9 @@ let cvEn = $state<CvData | null>(null);
 					art: "dokumente",
 					exportiert: new Date().toISOString(),
 					dokumente: documents.map((d) => ({ id: d.id, name: d.name })),
+					// Both pools travel: the English one is a separate list, and a
+					// round trip must never merge the two languages into one.
+					dokumenteEn: documentsEn.map((d) => ({ id: d.id, name: d.name })),
 				},
 				null,
 				2,
@@ -1436,16 +1493,26 @@ let cvEn = $state<CvData | null>(null);
 			}
 			const list = d.dokumente;
 			if (!Array.isArray(list)) throw new Error("Fehlendes Feld: dokumente");
-			const next: ExtraDocument[] = [];
-			for (const raw of list) {
-				const r = raw as Record<string, unknown>;
-				next.push({
-					id: typeof r.id === "string" ? r.id : nid(),
-					name: typeof r.name === "string" ? r.name : "",
-				});
-			}
-			documents = ensureDocumentIds(next);
-			documentFiles = {};
+			const readList = (raw: unknown): ExtraDocument[] => {
+				const out: ExtraDocument[] = [];
+				for (const item of raw as Record<string, unknown>[]) {
+					const r = item as Record<string, unknown>;
+					out.push({
+						id: typeof r.id === "string" ? r.id : nid(),
+						name: typeof r.name === "string" ? r.name : "",
+					});
+				}
+				return out;
+			};
+			// A file without `dokumenteEn` was written before the split: the
+			// German pool is what it carries, and the English one stays as it is.
+			const hasEn = Array.isArray(d.dokumenteEn);
+			// The files of a replaced pool are gone with it — but only of that
+			// pool, so importing the German list keeps the English uploads.
+			const oldIds = [...documents, ...(hasEn ? documentsEn : [])].map((d) => d.id);
+			documents = ensureDocumentIds(readList(list));
+			if (hasEn) documentsEn = ensureDocumentIds(readList(d.dokumenteEn));
+			for (const id of oldIds) if (id) delete documentFiles[id];
 			scheduleSave();
 		} catch (e) {
 			docsJsonError = e instanceof Error ? e.message : "Import fehlgeschlagen";
@@ -1468,7 +1535,7 @@ let cvEn = $state<CvData | null>(null);
 					signature: signatureFile,
 					sampleFiles,
 				},
-				staticData.samplesDisclaimer,
+				samplesDisclaimerText(staticData, job.language),
 			);
 			await downloadBlob(pdf, docFilename("Motivationsschreiben", job));
 		} catch (e) {
@@ -1507,7 +1574,7 @@ let cvEn = $state<CvData | null>(null);
 			job.letter,
 			samples,
 			assets,
-			staticData.samplesDisclaimer,
+			samplesDisclaimerText(staticData, job.language),
 		);
 		const cvPdf = await compileCvPdf(shared, job, cvFor(job), photoFile);
 		return { letterPdf, cvPdf };
@@ -1569,7 +1636,7 @@ let cvEn = $state<CvData | null>(null);
 		if (kind === "letter") return docFilename("Motivationsschreiben", job);
 		if (kind === "cv") return docFilename("Lebenslauf", job);
 		if (kind === "combined") return combinedFilename(job);
-		const doc = documents.find((d) => d.id === docIdOf(kind));
+		const doc = documentsFor(job).find((d) => d.id === docIdOf(kind));
 		return doc ? documentFilename(doc) : "Dokument.pdf";
 	}
 
@@ -1597,7 +1664,7 @@ let cvEn = $state<CvData | null>(null);
 						{ kind: "letter", name: attFilename("letter", job), size: sizes.letter },
 						{ kind: "cv", name: attFilename("cv", job), size: sizes.cv },
 					];
-		for (const doc of documents) {
+		for (const doc of documentsFor(job)) {
 			// A row without a file has nothing to attach; the PDF tab says so.
 			const file = doc.id ? documentFiles[doc.id] : undefined;
 			if (!file) continue;
@@ -1623,7 +1690,7 @@ let cvEn = $state<CvData | null>(null);
 				job.letter,
 				samples,
 				{ logo: jf?.logo ?? null, signature: signatureFile, sampleFiles },
-				staticData.samplesDisclaimer,
+				samplesDisclaimerText(staticData, job.language),
 			);
 		}
 		if (kind === "cv") return compileCvPdf(shared, job, cvFor(job), photoFile);
@@ -1646,7 +1713,7 @@ let cvEn = $state<CvData | null>(null);
 				sampleFiles,
 				photo: photoFile,
 			},
-			staticData.samplesDisclaimer,
+			samplesDisclaimerText(staticData, job.language),
 		);
 	}
 
@@ -1721,7 +1788,7 @@ let cvEn = $state<CvData | null>(null);
 				{ filename: docFilename("Lebenslauf", job), mimeType: "application/pdf", bytes: cvPdf },
 			);
 		}
-		for (const doc of documents) {
+		for (const doc of documentsFor(job)) {
 			if (!doc.id || !documentFiles[doc.id]) continue;
 			list.push({
 				filename: documentFilename(doc),
@@ -1879,6 +1946,8 @@ let cvEn = $state<CvData | null>(null);
 				view,
 				staticTab,
 				staticData,
+				documents,
+				documentsEn,
 				documentFilename,
 				(id) => !!documentFiles[id],
 				// The English CV is a second document in the backup — without it
@@ -1940,8 +2009,11 @@ let cvEn = $state<CvData | null>(null);
 		});
 
 		documents = p.documents;
+		// Only replaced when the backup carries an English pool: an older file
+		// has none, and the existing one must survive such a restore.
+		if (p.documentsEn) documentsEn = p.documentsEn;
 		documentFiles = {};
-		for (const doc of documents) {
+		for (const doc of [...documents, ...documentsEn]) {
 			const b64 = p.documentBase64[doc.id];
 			if (!b64) continue;
 			const file = dataUrlToFile(b64, documentFilename(doc));
@@ -1998,6 +2070,7 @@ let cvEn = $state<CvData | null>(null);
 	cvEn = null;
 	samples = structuredClone(DEFAULT_SAMPLES);
 		documents = structuredClone(DEFAULT_DOCUMENTS);
+		documentsEn = [];
 		staticData = structuredClone(DEFAULT_STATIC);
 		activeJobId = jobs[0]?.id ?? "";
 		view = "dashboard";
@@ -2133,13 +2206,13 @@ let cvEn = $state<CvData | null>(null);
 
 	// --- Extra PDFs (global pool, attached to every application) ---
 
-	function addDocument() {
-		documents.push({ id: nid(), name: "" });
+	function addDocument(list: ExtraDocument[]) {
+		list.push({ id: nid(), name: "" });
 	}
 
-	function removeDocument(id: string | undefined) {
-		const i = documents.findIndex((d) => d.id === id);
-		if (i >= 0) documents.splice(i, 1);
+	function removeDocument(list: ExtraDocument[], id: string | undefined) {
+		const i = list.findIndex((d) => d.id === id);
+		if (i >= 0) list.splice(i, 1);
 		if (id) delete documentFiles[id];
 	}
 
@@ -2155,14 +2228,15 @@ let cvEn = $state<CvData | null>(null);
 			return;
 		}
 		if (!isPdf(file)) {
-			error = `„${file.name}“ ist keine PDF-Datei.`;
+			error = `„${file.name}" ist keine PDF-Datei.`;
 			return;
 		}
 		error = "";
 		documentFiles[id] = file;
 		// Pre-fill the name from the file so the attachment is recognisable in
-		// the mail preview; a name the user already typed is left alone.
-		const doc = documents.find((d) => d.id === id);
+		// the mail preview; a name the user already typed is left alone. The
+		// row is looked up in the pool being edited — the two pools share no ids.
+		const doc = editingDocuments().find((d) => d.id === id);
 		if (doc && !doc.name.trim()) doc.name = file.name.replace(/\.pdf$/i, "");
 	}
 
@@ -3529,7 +3603,12 @@ let cvEn = $state<CvData | null>(null);
 					<div class="space-y-4 max-w-5xl">
 						<div class="{cardCls} space-y-2">
 							<div class="flex items-center justify-between">
-								<h4 class={hCls}>Hinweis über den Proben</h4>
+								<h4 class={hCls}>
+								Hinweis über den Proben
+								{#if shared.language === "en"}
+									<span class="font-normal text-slate-500">— englische Fassung</span>
+								{/if}
+							</h4>
 								<div class="flex gap-2">
 									<button
 										class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors"
@@ -3550,8 +3629,10 @@ let cvEn = $state<CvData | null>(null);
 							{#if samplesJsonError}
 								<p class="text-xs text-red-400">{samplesJsonError}</p>
 							{/if}
+							<!-- Binds to the active language's own string: the German
+							     note stays untouched while the English one is edited. -->
 							<textarea
-								bind:value={staticData.samplesDisclaimer}
+								bind:value={staticData[samplesDisclaimerKey]}
 								rows="6"
 								class="{inputCls} leading-relaxed resize-y"
 							></textarea>
@@ -3609,7 +3690,12 @@ let cvEn = $state<CvData | null>(null);
 					<div class="space-y-4 max-w-5xl">
 						<div class="{cardCls} space-y-2">
 							<div class="flex items-center justify-between">
-								<h4 class={hCls}>Zusätzliche PDFs</h4>
+								<h4 class={hCls}>
+									Zusätzliche PDFs
+									{#if shared.language === "en"}
+										<span class="font-normal text-slate-500">— englische Fassung</span>
+									{/if}
+								</h4>
 								<div class="flex gap-2">
 									<button
 										class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors"
@@ -3630,42 +3716,46 @@ let cvEn = $state<CvData | null>(null);
 							{#if docsJsonError}
 								<p class="text-xs text-red-400">{docsJsonError}</p>
 							{/if}
-							<p class="text-[11px] text-slate-400 leading-relaxed">
-								Zeugnisse, Nachweise, Zertifikate. Diese PDFs werden an
-								<strong class="text-slate-300">jede</strong> Bewerbungs-Mail angehängt: in der
-								Mail-Vorschau, in der .eml-Datei und beim Versand über Gmail. Sie gehen
-								außerdem in den Arbeitsbereich-Export (JSON, als Base64) mit ein.
-							</p>
-						</div>
-						{#each documents as doc, di (doc.id)}
-							<div class="{cardCls} space-y-3">
-								<div class="flex items-center justify-between">
-									<span class="text-xs font-semibold text-slate-500">PDF</span>
-									<div class="flex gap-2">
-										<button
-											onclick={() => move(documents, di, -1)}
-											disabled={di === 0}
-											class="text-xs text-slate-400 hover:underline disabled:opacity-30"
-											title="Nach oben"
-										>
-											↑
-										</button>
-										<button
-											onclick={() => move(documents, di, 1)}
-											disabled={di === documents.length - 1}
-											class="text-xs text-slate-400 hover:underline disabled:opacity-30"
-											title="Nach unten"
-										>
-											↓
-										</button>
-										<button
-											onclick={() => removeDocument(doc.id)}
-											class="text-xs text-red-400 hover:underline"
-										>
-											Entfernen
-										</button>
-									</div>
+						<p class="text-[11px] text-slate-400 leading-relaxed">
+							Zeugnisse, Nachweise, Zertifikate. Diese PDFs werden an
+							<strong class="text-slate-300">jede</strong> Bewerbungs-Mail angehängt: in der
+							Mail-Vorschau, in der .eml-Datei und beim Versand über Gmail. Sie gehen
+							außerdem in den Arbeitsbereich-Export (JSON, als Base64) mit ein.
+						</p>
+						<p class="text-[11px] text-slate-400 leading-relaxed">
+							Es gibt zwei Listen: eine deutsche und eine englische. Eine Bewerbung hängt
+							die Liste ihrer Sprache an — die jeweils andere bleibt hier unberührt.
+						</p>
+					</div>
+					{#each editingDocuments() as doc, di (doc.id)}
+						<div class="{cardCls} space-y-3">
+							<div class="flex items-center justify-between">
+								<span class="text-xs font-semibold text-slate-500">PDF</span>
+								<div class="flex gap-2">
+									<button
+										onclick={() => move(editingDocuments(), di, -1)}
+										disabled={di === 0}
+										class="text-xs text-slate-400 hover:underline disabled:opacity-30"
+										title="Nach oben"
+									>
+										↑
+									</button>
+									<button
+										onclick={() => move(editingDocuments(), di, 1)}
+										disabled={di === editingDocuments().length - 1}
+										class="text-xs text-slate-400 hover:underline disabled:opacity-30"
+										title="Nach unten"
+									>
+										↓
+									</button>
+									<button
+										onclick={() => removeDocument(editingDocuments(), doc.id)}
+										class="text-xs text-red-400 hover:underline"
+									>
+										Entfernen
+									</button>
 								</div>
+							</div>
 								<input
 									bind:value={doc.name}
 									placeholder="Name (z. B. Zeugnis Abitur)"
@@ -3691,7 +3781,7 @@ let cvEn = $state<CvData | null>(null);
 							</div>
 						{/each}
 						<button
-							onclick={addDocument}
+							onclick={() => addDocument(editingDocuments())}
 							class="text-xs font-medium border border-dashed border-[#1e293b] rounded py-2 text-slate-400 hover:bg-slate-800/50 w-full"
 						>
 							+ PDF hinzufügen
