@@ -30,6 +30,12 @@ export interface PersistedState {
 	shared: unknown;
 	jobs: unknown;
 	cv: unknown;
+	/**
+	 * The English instance of the global CV — a separate document from `cv`.
+	 * Absent in states saved before the split: the German CV is then the only
+	 * one, and the English instance is seeded as a copy when it is first needed.
+	 */
+	cvEn: unknown;
 	samples: unknown;
 	/** Extra PDFs (Statische Daten → PDF). Absent in states saved before this feature. */
 	documents: unknown;

@@ -255,6 +255,13 @@ export interface WorkspaceDoc extends Envelope {
 	bewerbungen: ApplicationNode[];
 	stammdaten: Record<string, JsonField<string>>;
 	lebenslauf: CvNode;
+	/**
+	 * The English instance of the global CV, when one exists. A second document
+	 * rather than a translated view of `lebenslauf`; absent means the file was
+	 * written before the split (or no English CV was ever created) and the
+	 * existing one stays untouched on import.
+	 */
+	lebenslaufEn?: CvNode | null;
 	dokumente: DocumentNode[];
 	/** Statische Daten (Erfahrung, Antrieb, Arbeitsproben-Hinweis). */
 	statischeDaten: Record<string, JsonField<string>>;
@@ -272,6 +279,13 @@ export interface WorkspaceDoc extends Envelope {
 export interface CvDoc extends Envelope {
 	art: "lebenslauf";
 	lebenslauf: CvNode;
+	/**
+	 * The English instance of the global CV — a separate document, not a
+	 * translation layer over `lebenslauf`. Only written by the global export,
+	 * and only once an English CV exists. Absent means "unchanged" on import:
+	 * a file that never carried one must not wipe a translated CV.
+	 */
+	lebenslaufEn?: CvNode | null;
 }
 
 export interface SharedDoc extends Envelope {
@@ -547,6 +561,11 @@ export function staticNode(sd: StaticData): Record<string, JsonField<string>> {
 			"Erfahrung & Kenntnisse",
 			sd.erfahrung,
 			"Nur Referenzmaterial für die KI — wird in kein PDF gerendert.",
+		),
+		erfahrungEn: field(
+			"Erfahrung & Kenntnisse (Englisch)",
+			sd.erfahrungEn,
+			"Eigener Text, keine Kopie — gilt, wenn die Bewerbung auf Englisch läuft. Leer = deutsche Fassung.",
 		),
 		antrieb: field(
 			"Was mich antreibt",
@@ -843,13 +862,15 @@ export function buildWorkspaceJson(
 	staticData: StaticData,
 	documentNames: (doc: ExtraDocument) => string,
 	documentHasFile: (id: string) => boolean,
+	/** The English instance of the global CV — its own document, not a layer over the German one. */
+	cvEn: CvData | null = null,
 ): WorkspaceDoc {
 	const first = inputs[0];
 	const activeIndex = Math.max(
 		0,
 		inputs.findIndex((i) => i.job.id === activeJobId),
 	);
-	return {
+	const doc: WorkspaceDoc = {
 		format: JSON_FORMAT,
 		version: JSON_VERSION,
 		art: "arbeitsbereich",
@@ -874,6 +895,10 @@ export function buildWorkspaceJson(
 		},
 		oberflaeche: { ansicht: view, statischeDatenReiter: staticTab },
 	};
+	// Carried only when one exists: an absent field has to mean "unchanged" on
+	// import, so an old backup never wipes a translated CV.
+	if (cvEn) doc.lebenslaufEn = cvNode(cvEn);
+	return doc;
 }
 
 /**
@@ -881,9 +906,18 @@ export function buildWorkspaceJson(
  *
  * `scope` changes nothing but the instructions: an application's own CV is the
  * very same document, and that is what lets one be copied to the other.
+ *
+ * `cvEn` is the English instance of the *global* CV and travels only in that
+ * scope: an application's own CV is one document in one language. The field is
+ * omitted when there is none, so an export never claims an English CV that
+ * does not exist.
  */
-export function buildCvJson(cv: CvData, scope: "global" | "bewerbung" = "global"): CvDoc {
-	return {
+export function buildCvJson(
+	cv: CvData,
+	scope: "global" | "bewerbung" = "global",
+	cvEn: CvData | null = null,
+): CvDoc {
+	const doc: CvDoc = {
 		format: JSON_FORMAT,
 		version: JSON_VERSION,
 		art: "lebenslauf",
@@ -892,10 +926,12 @@ export function buildCvJson(cv: CvData, scope: "global" | "bewerbung" = "global"
 			...ANLEITUNG_HEAD,
 			scope === "bewerbung"
 				? "Nur der Lebenslauf DIESER Bewerbung (eigener Lebenslauf). Er gilt nur hier und steht im Bewerbungs-Export unter bewerbung.eigenerLebenslauf; der globale Lebenslauf bleibt unverändert. Dasselbe Dokument lässt sich auch als globaler Lebenslauf importieren."
-				: "Nur der Lebenslauf (global, gilt für alle Bewerbungen ohne eigenen). Was pro Bewerbung ein-/ausgeschaltet ist, steht im Bewerbungs-Export unter bewerbung.auswahl.",
+				: "Nur der Lebenslauf (global, gilt für alle Bewerbungen ohne eigenen). Was pro Bewerbung ein-/ausgeschaltet ist, steht im Bewerbungs-Export unter bewerbung.auswahl. lebenslauf ist die deutsche Fassung; lebenslaufEn (wenn vorhanden) die englische — zwei getrennte Dokumente, beim Import wird jedes nur ersetzt, wenn es in der Datei steht.",
 		],
 		lebenslauf: cvNode(cv),
 	};
+	if (scope === "global" && cvEn) doc.lebenslaufEn = cvNode(cvEn);
+	return doc;
 }
 
 // ---------------------------------------------------------------------------
@@ -968,6 +1004,7 @@ function readStaticNode(node: unknown, fallback: StaticData): StaticData {
 	const n = node as Record<string, unknown>;
 	return {
 		erfahrung: readString(n.erfahrung, fallback.erfahrung),
+		erfahrungEn: readString(n.erfahrungEn, fallback.erfahrungEn),
 		antrieb: readString(n.antrieb, fallback.antrieb),
 		samplesDisclaimer: readString(n.arbeitsprobenHinweis, fallback.samplesDisclaimer),
 	};
@@ -1171,12 +1208,28 @@ export function readCvJson(doc: CvDoc): CvData | null {
 	return readCvNode(doc.lebenslauf);
 }
 
+/**
+ * Both language instances of a "lebenslauf" export.
+ *
+ * The German one is the payload, the English one is optional — a file written
+ * before the split has none, and then it must stay `null` so the caller can
+ * tell "no English CV in this file" from "an empty English CV".
+ */
+export function readCvPair(doc: {
+	lebenslauf?: unknown;
+	lebenslaufEn?: unknown;
+}): { de: CvData | null; en: CvData | null } {
+	return { de: readCvNode(doc.lebenslauf), en: readCvNode(doc.lebenslaufEn) };
+}
+
 export interface ParsedWorkspace {
 	jobs: ParsedApplication[];
 	/** Index into `jobs` — the file carries no ids. */
 	activeIndex: number | null;
 	shared: SharedData | null;
 	cv: CvData | null;
+	/** The English instance of the global CV — null when the file carries none. */
+	cvEn: CvData | null;
 	view: string | null;
 	staticTab: string | null;
 	staticData: StaticData | null;
@@ -1219,6 +1272,7 @@ export function readWorkspaceJson(
 		activeIndex: active >= 0 && active < jobs.length ? active : null,
 		shared: readSharedNode(doc.stammdaten, fallbackShared),
 		cv: readCvNode(doc.lebenslauf),
+		cvEn: readCvNode(doc.lebenslaufEn),
 		view: typeof oberflaeche.ansicht === "string" ? oberflaeche.ansicht : null,
 		staticTab: typeof oberflaeche.statischeDatenReiter === "string" ? oberflaeche.statischeDatenReiter : null,
 		staticData: readStaticNode(doc.statischeDaten, fallbackStatic),

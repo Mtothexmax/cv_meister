@@ -5,11 +5,18 @@
 
 import experienceTxt from "./static/experience.txt?raw";
 import antriebTxt from "./static/antrieb.txt?raw";
+import type { Language } from "./i18n.js";
 import { nid } from "./shared.js";
 
 export interface StaticData {
 	/** Experience & skills collection (seeded from experience.txt). */
 	erfahrung: string;
+	/**
+	 * The English variant of `erfahrung` — a separate string, not a copy.
+	 * Editing the English text never touches the German one, so switching the
+	 * language back shows what was there before.
+	 */
+	erfahrungEn: string;
 	/** What drives you (seeded from antrieb.txt). */
 	antrieb: string;
 	/** Disclaimer above the work samples (editable under Arbeitsproben). */
@@ -38,10 +45,23 @@ export interface ExtraDocument {
  */
 export const DEFAULT_STATIC: StaticData = {
 	erfahrung: experienceTxt,
+	erfahrungEn: "",
 	antrieb: antriebTxt,
 	samplesDisclaimer:
 		"Hinweis: Platzhaltertext. Hier kannst du einen Hinweis zu deinen Arbeitsproben eintragen — etwa eine Einordnung, wie die Projekte entstanden sind und welche Qualitätsmaßstäbe gelten.",
 };
+
+/**
+ * The experience text in the requested language, falling back to German while
+ * the English field is still empty.
+ *
+ * Same contract as `loc()` (Stammdaten) and `letterText()` (Anschreiben): the
+ * language picks the field, an empty field never produces an empty prompt.
+ */
+export function erfahrungText(sd: StaticData, lang: Language = "de"): string {
+	if (lang === "en" && sd.erfahrungEn.trim()) return sd.erfahrungEn;
+	return sd.erfahrung;
+}
 
 /**
  * Global pool of extra PDFs, edited once under Statische Daten → PDF.

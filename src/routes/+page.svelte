@@ -11,6 +11,7 @@
 	import { DEFAULT_LETTER, DEFAULT_SAMPLES, bewerbungTitel, composeMailBody, contactGreeting, letterText, safeAccentColor, type LetterData, type WorkSample } from "$lib/letter";
 	import {
 		DEFAULT_CV,
+		cloneCv,
 		normalizeCv,
 		skillValueKey,
 		toggleableEntries,
@@ -22,6 +23,7 @@
 		DEFAULT_DOCUMENTS,
 		DEFAULT_STATIC,
 		ensureDocumentIds,
+		erfahrungText,
 		type ExtraDocument,
 		type StaticData,
 	} from "$lib/static";
@@ -42,7 +44,7 @@
 		isAppJson,
 		readApplicationJson,
 		readArt,
-		readCvJson,
+		readCvPair,
 		sharedNode,
 		readSharedNode,
 		readWorkspaceJson,
@@ -95,6 +97,17 @@
 	let shared = $state<SharedData>(structuredClone(DEFAULT_SHARED));
 	let jobs = $state<JobData[]>(structuredClone(DEFAULT_JOBS));
 	let cv = $state<CvData>(normalizeCv(structuredClone(DEFAULT_CV)));
+/**
+ * The English CV — a second, fully independent instance.
+ *
+ * `null` until English is actually used: seeding a copy into every workspace
+ * that never switches would double the placeholder data for nothing. When it
+ * is first needed it becomes a deep copy of the German CV (ids included, so
+ * existing filter keys keep matching) — from then on the two never share a
+ * string. Pasting an English CV cannot overwrite the German one, and switching
+ * back shows the German exactly as it was left.
+ */
+let cvEn = $state<CvData | null>(null);
 	let samples = $state<WorkSample[]>(structuredClone(DEFAULT_SAMPLES));
 	/** Extra PDFs attached to every application (Statische Daten → PDF). */
 	let documents = $state<ExtraDocument[]>(structuredClone(DEFAULT_DOCUMENTS));
@@ -113,14 +126,53 @@
 	]);
 
 	/**
+	 * Which of the two experience strings the editor shows. The other one stays
+	 * in state — switching back shows it exactly as it was left.
+	 */
+	const erfahrungKey = $derived<"erfahrung" | "erfahrungEn">(
+		shared.language === "en" ? "erfahrungEn" : "erfahrung",
+	);
+
+	/**
 	 * The CV an application renders.
 	 *
 	 * One resolver for every caller — preview, both PDFs, JSON export and the
 	 * filter list. Anything reaching for the global `cv` directly would quietly
 	 * render the wrong document for an application that has its own.
+	 *
+	 * The language decides which global instance applies: an English
+	 * application renders the English CV, a German one the German. Until an
+	 * English CV exists it falls back to the German one — an application that
+	 * says "English" still has to render something sensible.
 	 */
 	function cvFor(job: JobData): CvData {
-		return job.ownCvEnabled && job.ownCv ? job.ownCv : cv;
+		if (job.ownCvEnabled && job.ownCv) return job.ownCv;
+		if (job.language === "en" && cvEn) return cvEn;
+		return cv;
+	}
+
+	/**
+	 * Seeds the English CV the first time it is needed — as a copy, so the user
+	 * has the German content to translate instead of an empty document.
+	 */
+	function ensureEnglishCv(): CvData {
+		if (!cvEn) cvEn = cloneCv($state.snapshot(cv));
+		return cvEn;
+	}
+
+	// Covers every path that flips the editor language (the switcher above the
+	// tabs, hydration, a Stammdaten import): the copy has to exist before the
+	// CV tab renders, or the first keystroke would land in the German CV.
+	$effect(() => {
+		if (shared.language === "en") ensureEnglishCv();
+	});
+
+	/**
+	 * The CV the Stammdaten editor acts on — the active language's instance.
+	 * Editing one never touches the other.
+	 */
+	function editingCv(): CvData {
+		return shared.language === "en" ? (cvEn ?? cv) : cv;
 	}
 
 	/** Only entries inside a category marked as switchable appear in the filter. */
@@ -483,6 +535,7 @@
 			shared,
 			jobs,
 			cv,
+			cvEn,
 			samples,
 			documents,
 			staticData,
@@ -498,10 +551,11 @@
 		return {
 			version: 1,
 			savedAt: new Date().toISOString(),
-			shared: snap.shared,
-			jobs: snap.jobs,
-			cv: snap.cv,
-			samples: snap.samples,
+		shared: snap.shared,
+		jobs: snap.jobs,
+		cv: snap.cv,
+		cvEn: snap.cvEn,
+		samples: snap.samples,
 			documents: snap.documents,
 			staticData: snap.staticData,
 			activeJobId,
@@ -603,13 +657,20 @@
 					}
 				}
 			}
-			if (s.cv && typeof s.cv === "object") cv = normalizeCv(s.cv as CvData);
-			if (Array.isArray(s.samples)) samples = s.samples as WorkSample[];
-			if (Array.isArray(s.documents)) documents = ensureDocumentIds(s.documents as ExtraDocument[]);
-			if (s.staticData && typeof s.staticData === "object")
-				staticData = s.staticData as StaticData;
-			if (typeof staticData.samplesDisclaimer !== "string")
-				staticData.samplesDisclaimer = structuredClone(DEFAULT_STATIC).samplesDisclaimer;
+		if (s.cv && typeof s.cv === "object") cv = normalizeCv(s.cv as CvData);
+		// The English instance is its own document. Absent in states saved
+		// before the split — then it stays null and is seeded as a copy the
+		// first time English is used.
+		if (s.cvEn && typeof s.cvEn === "object") cvEn = normalizeCv(s.cvEn as CvData);
+		if (Array.isArray(s.samples)) samples = s.samples as WorkSample[];
+		if (Array.isArray(s.documents)) documents = ensureDocumentIds(s.documents as ExtraDocument[]);
+		if (s.staticData && typeof s.staticData === "object")
+			staticData = s.staticData as StaticData;
+		if (typeof staticData.samplesDisclaimer !== "string")
+			staticData.samplesDisclaimer = structuredClone(DEFAULT_STATIC).samplesDisclaimer;
+		// Absent in states saved before the experience text was split: the
+		// German text is what those states carry, English starts empty.
+		if (typeof staticData.erfahrungEn !== "string") staticData.erfahrungEn = "";
 			if (typeof s.activeJobId === "string" && jobs.some((j) => j.id === s.activeJobId))
 				activeJobId = s.activeJobId;
 			if (s.view === "dashboard" || s.view === "detail" || s.view === "static") view = s.view;
@@ -1061,7 +1122,9 @@
 			firma: activeJob.firma,
 			rolle: activeJob.rolle,
 			adText: activeJob.adText,
-			erfahrung: staticData.erfahrung,
+			// The application's language picks the text: an English prompt must
+			// not be fed the German experience collection.
+			erfahrung: erfahrungText(staticData, activeJob.language),
 			antrieb: staticData.antrieb,
 			motivation: activeJob.motivation,
 			gehalt: shared.gehalt ? `${shared.gehalt} bei 40h` : "",
@@ -1104,7 +1167,11 @@
 	async function copyCvJson(scope: CvScope = "global") {
 		try {
 			const target = scope === "bewerbung" ? cvFor(activeJob) : cv;
-			const payload = JSON.stringify(buildCvJson($state.snapshot(target), scope), null, 2);
+			// The global export carries both language instances — one file, two
+			// documents. An application's own CV is a single document, so it
+			// never gets the English half.
+			const en = scope === "global" && cvEn ? $state.snapshot(cvEn) : null;
+			const payload = JSON.stringify(buildCvJson($state.snapshot(target), scope, en), null, 2);
 			await navigator.clipboard.writeText(payload);
 			cvCopied = scope;
 			clearTimeout(cvCopyTimer);
@@ -1132,7 +1199,8 @@
 			if (doc.art !== "lebenslauf") {
 				throw new Error(`Erwartet wird ein Lebenslauf-Export, gefunden: "${doc.art}".`);
 			}
-			const next = readCvJson(doc);
+			const pair = readCvPair(doc);
+			const next = pair.de;
 			if (!next) throw new Error("Fehlendes Feld: abschnitte");
 
 			if (scope === "bewerbung") {
@@ -1153,6 +1221,10 @@
 					.map((j) => [j.id, filterAsText(j, cv, samples)] as const),
 			);
 			cv = next;
+			// The English instance only changes when the file actually carries
+			// one — an export written before the split must not delete a
+			// translated CV that the app already has.
+			if (pair.en) cvEn = pair.en;
 			for (const j of jobs) {
 				const saved = filtersByJob.get(j.id);
 				if (saved) applyFilters(j, cv, samples, saved);
@@ -1224,6 +1296,9 @@
 					art: "erfahrung",
 					exportiert: new Date().toISOString(),
 					erfahrung: staticData.erfahrung,
+					// The English text is its own string — the export carries both,
+					// so a round trip never merges the two languages into one.
+					erfahrungEn: staticData.erfahrungEn,
 					antrieb: staticData.antrieb,
 					arbeitsprobenHinweis: staticData.samplesDisclaimer,
 				},
@@ -1248,6 +1323,7 @@
 				throw new Error(`Erwartet wird Erfahrung, gefunden: "${d.art}".`);
 			}
 			if (typeof d.erfahrung === "string") staticData.erfahrung = d.erfahrung;
+			if (typeof d.erfahrungEn === "string") staticData.erfahrungEn = d.erfahrungEn;
 			if (typeof d.antrieb === "string") staticData.antrieb = d.antrieb;
 			if (typeof d.arbeitsprobenHinweis === "string") staticData.samplesDisclaimer = d.arbeitsprobenHinweis;
 			scheduleSave();
@@ -1805,6 +1881,9 @@
 				staticData,
 				documentFilename,
 				(id) => !!documentFiles[id],
+				// The English CV is a second document in the backup — without it
+				// a restore would silently drop the translated version.
+				cvEn,
 			);
 			await downloadJson(doc, jsonFilename("Arbeitsbereich"));
 		} catch (e) {
@@ -1840,6 +1919,9 @@
 
 		if (p.shared) shared = p.shared;
 		if (p.cv) cv = p.cv;
+		// Only replaced when the backup carries an English CV: an older file
+		// has none, and the existing instance must survive such a restore.
+		if (p.cvEn) cvEn = p.cvEn;
 		if (p.staticData) staticData = p.staticData;
 
 		// The work-sample pool is global and stored once, at the top level.
@@ -1910,10 +1992,11 @@
 	 * overwrite an already-saved state.
 	 */
 	function resetToPlaceholders() {
-		shared = structuredClone(DEFAULT_SHARED);
-		jobs = structuredClone(DEFAULT_JOBS);
-		cv = normalizeCv(structuredClone(DEFAULT_CV));
-		samples = structuredClone(DEFAULT_SAMPLES);
+	shared = structuredClone(DEFAULT_SHARED);
+	jobs = structuredClone(DEFAULT_JOBS);
+	cv = normalizeCv(structuredClone(DEFAULT_CV));
+	cvEn = null;
+	samples = structuredClone(DEFAULT_SAMPLES);
 		documents = structuredClone(DEFAULT_DOCUMENTS);
 		staticData = structuredClone(DEFAULT_STATIC);
 		activeJobId = jobs[0]?.id ?? "";
@@ -2138,6 +2221,9 @@
 	 * filter keys keep matching) and jumps straight to the new tab — the switch
 	 * only makes sense if you can edit what it turns on. Turning it off keeps
 	 * the CV around; an accidental click must not throw the work away.
+	 *
+	 * The copy comes from the instance in the application's own language: an
+	 * English application must not start from the German CV.
 	 */
 	function toggleOwnCv() {
 		const job = activeJob;
@@ -2146,7 +2232,10 @@
 			detailTab = "bewerbung";
 			previewDoc = "letter";
 		} else {
-			if (!job.ownCv) job.ownCv = normalizeCv($state.snapshot(cv));
+			if (!job.ownCv)
+				job.ownCv = normalizeCv(
+					$state.snapshot(job.language === "en" ? (cvEn ?? cv) : cv),
+				);
 			job.ownCvEnabled = true;
 			selectDetailTab("lebenslauf");
 			return;
@@ -2360,17 +2449,25 @@
 		global one. Both write the identical "lebenslauf" document, which is what
 		lets a CV be moved between the two by copy and paste.
 	-->
-	{#snippet cvEditor(target: CvData, scope: CvScope)}
-		<div class="space-y-4 max-w-5xl">
-			{#if scope === "bewerbung"}
-				<div
-					id="own-cv-note"
-					class="text-[11px] text-amber-200/90 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 leading-relaxed"
-				>
-					Das ist der <strong>eigene Lebenslauf dieser Bewerbung</strong>. Er gilt nur hier — der
-					Lebenslauf aus den Statischen Daten bleibt unverändert.
-				</div>
-			{/if}
+{#snippet cvEditor(target: CvData, scope: CvScope)}
+	<div class="space-y-4 max-w-5xl">
+		{#if scope === "bewerbung"}
+			<div
+				id="own-cv-note"
+				class="text-[11px] text-amber-200/90 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 leading-relaxed"
+			>
+				Das ist der <strong>eigene Lebenslauf dieser Bewerbung</strong>. Er gilt nur hier — der
+				Lebenslauf aus den Statischen Daten bleibt unverändert.
+			</div>
+		{:else if shared.language === "en"}
+			<div
+				id="cv-language-note"
+				class="text-[11px] text-sky-200/90 bg-sky-500/10 border border-sky-500/30 rounded-lg px-3 py-2 leading-relaxed"
+			>
+				Das ist der <strong>englische Lebenslauf</strong> — eine eigene Kopie. Was du hier änderst,
+				steht nur in der englischen Fassung; der deutsche Lebenslauf bleibt unverändert.
+			</div>
+		{/if}
 			<!-- Scoped id: the detail view's action bar carries a "JSON kopieren" of
 			     its own (the whole application), so the CV buttons need to be
 			     addressable on their own. -->
@@ -3427,7 +3524,7 @@
 						{/each}
 					</nav>
 					{#if staticTab === "lebenslauf"}
-					{@render cvEditor(cv, "global")}
+					{@render cvEditor(editingCv(), "global")}
 				{:else if staticTab === "proben"}
 					<div class="space-y-4 max-w-5xl">
 						<div class="{cardCls} space-y-2">
@@ -3604,7 +3701,12 @@
 					<div class="space-y-4 max-w-5xl">
 						<div class="{cardCls} space-y-2">
 							<div class="flex items-center justify-between">
-								<h4 class={hCls}>Erfahrung & Kenntnisse</h4>
+								<h4 class={hCls}>
+									Erfahrung & Kenntnisse
+									{#if shared.language === "en"}
+										<span class="font-normal text-slate-500">— englische Fassung</span>
+									{/if}
+								</h4>
 								<div class="flex gap-2">
 									<button
 										class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 transition-colors"
@@ -3625,8 +3727,10 @@
 							{#if staticJsonError}
 								<p class="text-xs text-red-400">{staticJsonError}</p>
 							{/if}
+							<!-- Binds to the active language's own string: the German
+							     text stays untouched while the English one is edited. -->
 							<textarea
-								bind:value={staticData.erfahrung}
+								bind:value={staticData[erfahrungKey]}
 								rows="20"
 								class="{inputCls} font-mono leading-relaxed resize-y"
 							></textarea>

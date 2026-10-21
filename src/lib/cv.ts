@@ -81,6 +81,21 @@ export function normalizeCv(cv: CvData): CvData {
 	return cv;
 }
 
+/**
+ * Deep copy of a CV — the second instance that carries the other language.
+ *
+ * The copy keeps every id on purpose: the per-application filter keys are
+ * built from them, and a copy that handed out fresh ids would silently drop
+ * the switch state of every application using this CV.
+ *
+ * This is what makes the two language instances independent: editing the copy
+ * can never write through to the original, so pasting an English CV leaves the
+ * German one exactly as it was.
+ */
+export function cloneCv(cv: CvData): CvData {
+	return normalizeCv(structuredClone(cv));
+}
+
 /** Only the entries of a marked category may be switched off per application. */
 export function isToggleable(group: CvSkillGroup): boolean {
 	return group.toggleable === true;
