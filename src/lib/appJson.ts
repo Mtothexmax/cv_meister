@@ -419,6 +419,10 @@ const ANLEITUNG_APP_TAIL = [
 	"steht er vollständig unter bewerbung.eigenerLebenslauf.lebenslauf. Er gehört nur zu dieser Bewerbung und",
 	"wird beim Import aus diesem Feld übernommen; bewerbung.auswahl bezieht sich dann auf ihn. Fehlt der",
 	"Abschnitt ganz, bleibt ein in der App vorhandener eigener Lebenslauf unangetastet.",
+	"anschreiben.text und anschreiben.textEn enthalten NUR den Mittelteil: Anrede und Grußformel setzt die App",
+	"selbst davor bzw. dahinter (Anrede aus felder.ansprechpartner + felder.anrede, Gruß aus",
+	"anschreiben.grussformel bzw. grussformelEn). Schreibe beides NICHT zusätzlich in den Text — sonst stehen",
+	"sie im PDF doppelt. Im Abschnitt vorschau sieht man, wie die App die Teile zusammensetzt.",
 	"Bilder sind nicht als Base64 enthalten, sondern nur als Referenz (Name/Vorhanden). Einzige Ausnahme: das Firmenlogo —",
 	"es steht als URL in firmenlogo.value.url und kann dort gesetzt werden; die App lädt das Bild dann von dieser URL.",
 	"Beim Import werden die Felder, das Anschreiben, die Auswahl und die Stammdaten übernommen. Lebenslauf, Arbeitsproben",
@@ -432,6 +436,7 @@ const ANLEITUNG_WORKSPACE_TAIL = [
 	'Es gibt zwei Dokument-Listen: "dokumente" (deutsch) und "dokumenteEn" (englisch). Eine Bewerbung hängt die Liste ihrer Sprache an.',
 	"Zuordnungen laufen über die Indizes in bewerbungen[] und die sichtbaren Namen — es gibt keine IDs.",
 	"Jede Bewerbung kann einen eigenen Lebenslauf haben (bewerbungen[].eigenerLebenslauf); ist er dort nicht aktiv, gilt der globale Lebenslauf oben.",
+	"anschreiben.text/textEn enthalten nur den MITTLEREN Teil — Anrede und Grußformel setzt die App selbst, nicht doppelt hineinschreiben.",
 ];
 
 export interface ApplicationInput {
@@ -712,6 +717,24 @@ export const EMAIL_TEXT_INFO =
 	'Nur der MITTLERE Teil der Mail. Anrede ("Sehr geehrte …") und Grußformel ("Mit freundlichen Grüßen" + Name) werden automatisch ergänzt — hier NICHT eintragen, sonst stehen sie doppelt. Die Anrede ergibt sich aus Ansprechpartner/Anrede, die Grußformel aus dem Anschreiben.';
 
 /**
+ * Hint for the cover letter's body. Same wording job as EMAIL_TEXT_INFO, and
+ * shared between the JSON `info` and the UI for the same reason.
+ *
+ * The salutation is not stored in the body: `contactGreeting()` derives it from
+ * `ansprechpartner` + `anrede` and puts it in front of the first paragraph, and
+ * the closing comes from `anschreiben.grussformel`. A model that writes the
+ * salutation into `text.value` therefore produces it twice in the PDF — which
+ * is exactly what kept happening. So the hint names the two fields the parts
+ * come from and says outright not to write them.
+ */
+export const LETTER_TEXT_INFO =
+	'Nur der MITTLERE Teil des Anschreibens. Anrede ("Sehr geehrte Frau Müller," / "Dear Ms. Müller,") und Grußformel ("Mit freundlichen Grüßen" + Name) setzt die App selbst davor bzw. dahinter — hier NICHT eintragen, sonst stehen sie doppelt im PDF. Die Anrede ergibt sich aus felder.ansprechpartner + felder.anrede, die Grußformel aus anschreiben.grussformel. Beginne direkt mit dem ersten inhaltlichen Satz. Leerzeile = neuer Absatz.';
+
+/** Same rule for the English body, which pairs with `grussformelEn`. */
+export const LETTER_TEXT_INFO_EN =
+	'Englischer Fließtext — dieselbe Regel: NUR der MITTLERE Teil, ohne Anrede ("Dear …") und ohne Grußformel ("Sincerely"). Beides ergänzt die App automatisch (Anrede aus felder.ansprechpartner + felder.anrede, Gruß aus anschreiben.grussformelEn) — hier NICHT eintragen, sonst stehen sie doppelt im PDF. Leerzeile = neuer Absatz.';
+
+/**
  * One application.
  *
  * `withImages` adds the logo bytes; only the workspace export sets it. The
@@ -787,17 +810,22 @@ function applicationNode(input: ApplicationInput, withImages = false) {
 			),
 		},
 		anschreiben: {
-			text: field("Text", job.letter.body, "Leerzeile = neuer Absatz"),
-			grussformel: field("Grußformel", job.letter.closing),
+			text: field("Text (Leerzeile = neuer Absatz)", job.letter.body, LETTER_TEXT_INFO),
+			grussformel: field(
+				"Grußformel",
+				job.letter.closing,
+				"Steht im PDF unter dem Text, darunter die Unterschrift und der Name. Gehört NICHT zusätzlich in anschreiben.text.",
+			),
 			textEn: field(
 				"Text (Englisch)",
 				job.letter.bodyEn,
-				'Genau dieses Feld wird verwendet, wenn felder.sprache.value = "en" ist. Leer = es fällt der deutsche Text heraus.',
+				'Genau dieses Feld wird verwendet, wenn felder.sprache.value = "en" ist. Leer = es fällt der deutsche Text heraus. '
+				+ LETTER_TEXT_INFO_EN,
 			),
 			grussformelEn: field(
 				"Grußformel (Englisch)",
 				job.letter.closingEn,
-				'Genau dieses Feld wird verwendet, wenn felder.sprache.value = "en" ist.',
+				'Genau dieses Feld wird verwendet, wenn felder.sprache.value = "en" ist. Gehört NICHT zusätzlich in anschreiben.textEn.',
 			),
 		},
 		auswahl: {

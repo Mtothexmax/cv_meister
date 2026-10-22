@@ -37,6 +37,8 @@
 	import {
 		JSON_VERSION,
 		EMAIL_TEXT_INFO,
+		LETTER_TEXT_INFO,
+		LETTER_TEXT_INFO_EN,
 		applyFilters,
 		buildApplicationJson,
 		buildCvJson,
@@ -3512,6 +3514,11 @@ let cvEn = $state<CvData | null>(null);
 											rows="12"
 											class="{inputCls} font-mono leading-relaxed resize-y"
 										></textarea>
+										<!-- Same wording as the JSON `info` for this field, so a human
+										     and an AI read the identical rule. -->
+										<p class="text-[10px] text-slate-500 leading-relaxed mt-1">
+											{LETTER_TEXT_INFO}
+										</p>
 									</div>
 									<div>
 										<span class={labelCls}>Grußformel</span>
@@ -3537,6 +3544,9 @@ let cvEn = $state<CvData | null>(null);
 											placeholder="Write the cover letter in English — blank lines start a new paragraph."
 											class="{inputCls} font-mono leading-relaxed resize-y"
 										></textarea>
+										<p class="text-[10px] text-slate-500 leading-relaxed mt-1">
+											{LETTER_TEXT_INFO_EN}
+										</p>
 										{#if !activeJob.letter.bodyEn.trim()}
 											<p class="text-[10px] text-amber-500/90 leading-relaxed mt-1">
 												Sobald hier Text steht, wird er statt des deutschen verwendet. Solange das

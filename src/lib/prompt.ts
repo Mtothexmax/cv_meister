@@ -96,6 +96,13 @@ export function buildCoverPrompt(input: CoverPromptInput): string {
 		en
 			? "- no formatting (no markdown, no bullet lists, no headings)"
 			: "- keine Formatierung (kein Markdown, keine Aufzählung, keine Überschriften)",
+		// Named twice on purpose: the text lands in a field that the app wraps
+		// in its own salutation and sign-off, so writing them here duplicates
+		// them in the PDF. A single "no salutation" in the task line was easy
+		// to skim past.
+		en
+			? '- do NOT write the salutation ("Dear …") or the sign-off ("Sincerely") — the app adds both, so they would appear twice'
+			: '- keine Anrede ("Sehr geehrte …") und keine Grußformel ("Mit freundlichen Grüßen") — beides setzt die App selbst davor und dahinter, sonst steht es doppelt im PDF',
 		en ? "- output nothing but this text" : "- gib nichts anderes aus als diesen Text",
 	].join("\n");
 }
